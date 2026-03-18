@@ -170,13 +170,71 @@ async def _print_interactive_response(response: str, render_markdown: bool) -> N
     await run_in_terminal(_write)
 
 
+import random
+
+# 有趣的思考状态文字列表 - AI/ML梗合集
+_THINKING_MESSAGES = [
+    # 偏"模型内部自嘲"
+    "[dim]🧠 正在进行多步推理（chain-of-thought 但不展示）…[/dim]",
+    "[dim]✨ attention 正在对齐重点内容…[/dim]",
+    "[dim]📉 当前 loss 还不够低，继续优化中…[/dim]",
+    "[dim]🌀 正在避免对 PPT 产生幻觉…[/dim]",
+    "[dim]🎯 模型正在努力泛化你的知识…[/dim]",
+    "[dim]📡 正在从 noisy slides 中提取 signal…[/dim]",
+    "[dim]🗜️ 正在压缩 token，但不压缩理解…[/dim]",
+    
+    # 偏"训练 / 优化梗"
+    "[dim]⚡ 正在进行一次高质量的 gradient update…[/dim]",
+    "[dim]🔄 正在从过拟合走向理解…[/dim]",
+    "[dim]📊 学习率已自动调优…[/dim]",
+    "[dim]📚 正在进行 curriculum learning…[/dim]",
+    "[dim]💾 当前 batch 的信息量有点大…[/dim]",
+    "[dim]🔧 正在对知识进行 fine-tune…[/dim]",
+    "[dim]🎲 正在尝试收敛（希望不是局部最优）…[/dim]",
+    
+    # 偏"LLM / Agent 梗"
+    "[dim]🤖 agent 正在调用「考试模式」策略…[/dim]",
+    "[dim]⚙️ reasoning 模块正在加载中…[/dim]",
+    "[dim]📏 context window 正在极限拉伸…[/dim]",
+    "[dim]🔢 正在进行一次严肃的 token 计算…[/dim]",
+    "[dim]🛠️ 工具调用成功，继续思考中…[/dim]",
+    "[dim]🔮 正在构建你的知识 embedding…[/dim]",
+    "[dim]🔍 retrieval 模块正在翻找重点…[/dim]",
+    
+    # 偏"论文/科研味"
+    "[dim]📝 正在复现老师上课时的一笔带过…[/dim]",
+    "[dim]🏆 正在寻找真正的 contribution…[/dim]",
+    "[dim]💎 正在从表面现象提炼核心结论…[/dim]",
+    "[dim]🏗️ 正在把 intuition 变成结构化知识…[/dim]",
+    "[dim]🧪 正在进行一次不太严谨但很有用的建模…[/dim]",
+    "[dim]❓ 正在尝试解释为什么这个东西会考…[/dim]",
+    "[dim]📖 正在把故事变成定理…[/dim]",
+    
+    # 偏"更抽象一点（高级点的梗）"
+    "[dim]🎈 正在最小化你的认知负担…[/dim]",
+    "[dim]💰 正在最大化考试收益…[/dim]",
+    "[dim]🎯 正在构建一个更优的理解表示…[/dim]",
+    "[dim]📦 正在进行信息瓶颈压缩…[/dim]",
+    "[dim]🌊 正在逼近知识的低维流形…[/dim]",
+    "[dim]🔗 正在对齐你的理解与考试分布…[/dim]",
+    "[dim]📊 正在优化你的 recall / precision trade-off…[/dim]",
+    
+    # 偏"轻微幽默（但不低级）"
+    "[dim]🚫 正在防止你在考场上 hallucinate…[/dim]",
+    "[dim]🏃 有些知识点正在试图逃避被记住…[/dim]",
+    "[dim]⬆️ 正在把「看过」升级为「会写」…[/dim]",
+    "[dim]📉 正在降低你考试时的 perplexity…[/dim]",
+    "[dim]🌟 正在将困惑转化为确定性…[/dim]",
+    "[dim]⚠️ 正在避免出现认知上的 mode collapse…[/dim]",
+]
+
+
 class _ThinkingSpinner:
     """Spinner wrapper with pause support for clean progress output."""
 
     def __init__(self, enabled: bool):
-        self._spinner = console.status(
-            "[dim]nanobot is thinking...[/dim]", spinner="dots"
-        ) if enabled else None
+        message = random.choice(_THINKING_MESSAGES)
+        self._spinner = console.status(message, spinner="dots") if enabled else None
         self._active = False
 
     def __enter__(self):
