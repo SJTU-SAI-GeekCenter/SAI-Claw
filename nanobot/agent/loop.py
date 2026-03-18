@@ -20,6 +20,8 @@ from nanobot.agent.tools.arxiv import ArxivGetTool, ArxivSearchTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.pdf import PDFInfoTool, ReadPDFTool
+from nanobot.agent.tools.summarize_pdf import SummaryFileCommandTool, SummaryPDFFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -121,6 +123,9 @@ class AgentLoop:
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
         for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(ReadPDFTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(PDFInfoTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(SummaryPDFFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
@@ -412,11 +417,16 @@ class AgentLoop:
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
+        
+        # /summaryfile command - 期末考试复习助手
+        if cmd.startswith("/summaryfile"):
+            return await self._handle_summaryfile_command(msg)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
@@ -497,6 +507,161 @@ class AgentLoop:
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()
+
+    async def _handle_summaryfile_command(
+        self, msg: InboundMessage
+    ) -> OutboundMessage:
+        """Handle /summaryfile command - 期末考试复习助手"""
+        content = msg.content.strip()
+        parts = content.split(maxsplit=2)
+        
+        if len(parts) < 2:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "❌ 用法错误\n\n"
+                    "📚 /summaryfile - 期末考试复习助手\n"
+                    "帮你快速总结PDF讲义，生成结构化复习材料\n\n"
+                    "用法：\n"
+                    "  /summaryfile /path/to/file.pdf\n"
+                    "  /summaryfile ~/Downloads/lecture.pdf --exam-date 2024-01-20\n"
+                    "  /summaryfile ./notes.pdf --focus '第三章积分'\n\n"
+                    "功能包括：\n"
+                    "  ✅ 核心要点速览\n"
+                    "  ✅ 重点复习区域（必考/高频/了解）\n"
+                    "  ✅ 易混淆概念辨析\n"
+                    "  ✅ 公式定理速记\n"
+                    "  ✅ 模拟练习题\n"
+                    "  ✅ 知识图谱\n"
+                    "  ✅ 记忆技巧\n"
+                    "  ✅ 考试陷阱提醒\n"
+                    "  ✅ 复习时间规划"
+                ),
+            )
+        
+        # 解析参数
+        file_path = parts[1]
+        extra_args = parts[2] if len(parts) > 2 else ""
+        
+        exam_date = None
+        focus_areas = None
+        
+        # 解析 --exam-date 和 --focus
+        if "--exam-date" in extra_args:
+            try:
+                idx = extra_args.index("--exam-date")
+                date_part = extra_args[idx + len("--exam-date"):].strip()
+                exam_date = date_part.split()[0] if date_part else None
+            except:
+                pass
+        
+        if "--focus" in extra_args:
+            try:
+                idx = extra_args.index("--focus")
+                focus_part = extra_args[idx + len("--focus"):].strip()
+                # 提取引号内的内容或第一个单词
+                if focus_part.startswith('"') or focus_part.startswith("'"):
+                    quote_char = focus_part[0]
+                    end_idx = focus_part.find(quote_char, 1)
+                    if end_idx > 0:
+                        focus_areas = focus_part[1:end_idx]
+                else:
+                    focus_areas = focus_part.split()[0] if focus_part else None
+            except:
+                pass
+        
+        # 发送处理中消息
+        progress_msg = f"📚 正在为你生成复习材料...\n📄 文件: {file_path}"
+        if exam_date:
+            progress_msg += f"\n📅 考试日期: {exam_date}"
+        if focus_areas:
+            progress_msg += f"\n🎯 重点: {focus_areas}"
+        
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=progress_msg,
+            )
+        )
+        
+        # 调用 summary_pdf_file 工具读取并准备总结内容
+        summary_tool = self.tools.get("summary_pdf_file")
+        if not summary_tool:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="❌ 错误：summary_pdf_file 工具未加载",
+            )
+        
+        # 获取PDF内容（会返回一个大型prompt）
+        pdf_content = await summary_tool.execute(
+            file_path=file_path,
+            exam_date=exam_date,
+            focus_areas=focus_areas,
+        )
+        
+        if pdf_content.startswith("❌") or pdf_content.startswith("Error"):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=pdf_content,
+            )
+        
+        # 使用 LLM 生成结构化总结
+        from nanobot.agent.context import ContextBuilder
+        
+        session = self.sessions.get_or_create(f"{msg.channel}:{msg.chat_id}")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是一位专业的学习助手和考试辅导专家。\n"
+                    "你的任务是帮助学生高效复习，准备期末考试。\n"
+                    "请基于提供的PDF内容，生成结构化、易读的复习材料。\n"
+                    "使用 emoji、表格、列表等格式增强可读性。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": pdf_content,
+            },
+        ]
+        
+        try:
+            final_content = await self._run_agent_loop_simple(messages)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=final_content or "生成复习材料时出错，请重试",
+            )
+        except Exception as e:
+            logger.error("Failed to generate summary: {}", e)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"❌ 生成复习材料失败: {e}",
+            )
+    
+    async def _run_agent_loop_simple(self, messages: list[dict]) -> str:
+        """Simplified agent loop for single-turn generation"""
+        try:
+            from nanobot.providers.base import GenerationSettings
+            
+            response = await self.provider.chat(
+                messages=messages,
+                tools=None,  # 不启用工具，纯文本生成
+                model=self.model,
+                max_tokens=8192,
+                temperature=0.3,
+            )
+            
+            return response.content or "生成内容为空"
+            
+        except Exception as e:
+            logger.error("Simple agent loop failed: {}", e)
+            return f"生成失败: {e}"
 
     async def process_direct(
         self,
