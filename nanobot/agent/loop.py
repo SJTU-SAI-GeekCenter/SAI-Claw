@@ -35,7 +35,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, SJTUConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -69,6 +69,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        sjtu_config: SJTUConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -99,6 +100,7 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
+        self._sjtu_config = sjtu_config
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -400,6 +402,11 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        # /config multi-step state — intercept BEFORE slash-command check so
+        # the password message never reaches the LLM or session history.
+        if session.metadata.get("_config_step"):
+            return await self._handle_config_step(msg, session)
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
@@ -419,6 +426,7 @@ class AgentLoop:
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/config /xuanke — 设置选课社区账号（邮箱+密码）",
                 "/xuanke <课程名/课号/教师> — 查询 SJTU 选课社区评价",
                 "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
                 "/help — Show available commands",
@@ -426,11 +434,15 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
-        
+
+        # /config subcommands
+        if cmd == "/config /xuanke":
+            return await self._handle_config_xuanke_start(msg, session)
+
         # /xuanke command - SJTU 选课社区查询
         if cmd.startswith("/xuanke"):
             return await self._handle_xuanke_command(msg)
-        
+
         # /summaryfile command - 期末考试复习助手
         if cmd.startswith("/summaryfile"):
             return await self._handle_summaryfile_command(msg)
@@ -651,6 +663,75 @@ class AgentLoop:
                 content=f"❌ 生成复习材料失败: {e}",
             )
     
+    async def _handle_config_xuanke_start(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Start the /config /xuanke credential collection flow."""
+        session.metadata["_config_step"] = "xuanke_username"
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="🔐 选课社区账号设置\n\n请输入你的 course.sjtu.plus 邮箱：",
+        )
+
+    async def _handle_config_step(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Handle subsequent messages in the /config flow."""
+        from nanobot.config.loader import get_config_path, load_config, save_config
+
+        step = session.metadata.get("_config_step")
+        text = msg.content.strip()
+
+        if step == "xuanke_username":
+            session.metadata["_config_step"] = "xuanke_password"
+            session.metadata["_config_pending_username"] = text
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="请输入你的 course.sjtu.plus 密码：",
+            )
+
+        if step == "xuanke_password":
+            username = session.metadata.pop("_config_pending_username", "")
+            session.metadata.pop("_config_step", None)
+
+            try:
+                config = load_config(get_config_path())
+                config.sjtu.jaccount_username = username
+                config.sjtu.jaccount_password = text
+                save_config(config, get_config_path())
+                if self._sjtu_config is not None:
+                    self._sjtu_config.jaccount_username = username
+                    self._sjtu_config.jaccount_password = text
+            except Exception as exc:
+                logger.error("Failed to save xuanke credentials: {}", exc)
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"❌ 保存失败：{exc}",
+                )
+
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"✅ 选课社区账号已保存（用户名：{username}）\n\n现在可以使用 /xuanke 查询课程评价了。",
+            )
+
+        # Unknown step — clear state
+        session.metadata.pop("_config_step", None)
+        session.metadata.pop("_config_pending_username", None)
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="❌ 设置流程出错，已重置。请重新发送 /config /xuanke。",
+        )
+
     async def _handle_xuanke_command(
         self, msg: InboundMessage
     ) -> OutboundMessage:
@@ -735,86 +816,115 @@ class AgentLoop:
                 content=f"❌ 查询失败: {e}",
             )
     
+    def _get_oc_base_url(self) -> str:
+        """Return the course community base URL.
+
+        Uses the official course.sjtu.plus when JAccount credentials are
+        configured, otherwise falls back to the community mirror.
+        """
+        if (
+            self._sjtu_config
+            and self._sjtu_config.jaccount_username
+            and self._sjtu_config.jaccount_password
+        ):
+            return "https://course.sjtu.plus"
+        return "http://nas.oct0pus.top:41735"
+
+    async def _make_course_session(self) -> tuple[Any, str]:
+        """Return (session_or_None, base_url). Session is already logged in if credentials exist."""
+        from nanobot.agent.jaccount import CourseSJTUSession
+
+        base_url = self._get_oc_base_url()
+        if not base_url.startswith("https://course.sjtu.plus"):
+            return None, base_url
+
+        session = CourseSJTUSession(
+            self._sjtu_config.jaccount_username,  # type: ignore[union-attr]
+            self._sjtu_config.jaccount_password,  # type: ignore[union-attr]
+        )
+        ok = await session.login()
+        if not ok:
+            logger.warning("course.sjtu.plus login failed; falling back to mirror API")
+            return None, "http://nas.oct0pus.top:41735"
+        return session, base_url
+
     async def _search_courses_batch(self, query: str, max_pages: int = 100) -> list[dict]:
-        """Search courses from SJTU course mirror API with specified page limit"""
-        base_url = "http://nas.oct0pus.top:41735"
-        query_lower = query.lower()
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # 先获取第1页
-            response = await client.get(
-                f"{base_url}/api/course/",
-                params={"page": 1, "page_size": 20}
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            all_courses = data.get("results", [])
-            total_count = data.get("count", 0)
-            total_pages = (total_count + 19) // 20
-            
-            # 限制搜索页数
-            max_pages = min(max_pages, total_pages)
-            
-            # 并发获取多页
-            async def fetch_page(page: int) -> tuple[int, list[dict]]:
+        """Search courses using the course-in-review search API (server-side filtering)."""
+        session, base_url = await self._make_course_session()
+        use_official = base_url.startswith("https://course.sjtu.plus")
+
+        try:
+            if use_official and session:
+                # Official API: use server-side search endpoint
+                resp = await session.get(
+                    f"{base_url}/api/course-in-review/",
+                    params={"q": query},
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("results", [])
+                return []
+
+            # Mirror fallback: client-side filtering across all pages
+            query_lower = query.lower()
+            all_courses: list[dict] = []
+
+            async def _fetch_mirror(page: int) -> list[dict]:
                 try:
-                    resp = await client.get(
-                        f"{base_url}/api/course/",
-                        params={"page": page, "page_size": 20},
-                        timeout=15.0
-                    )
-                    if resp.status_code == 200:
-                        return page, resp.json().get("results", [])
+                    async with httpx.AsyncClient(timeout=15.0) as c:
+                        r = await c.get(
+                            f"{base_url}/api/course/",
+                            params={"page": page, "page_size": 20},
+                        )
+                        if r.status_code == 200:
+                            return r.json().get("results", [])
                 except Exception:
                     pass
-                return page, []
-            
-            # 分批并发获取，每批50个请求
-            batch_size = 50
-            for batch_start in range(2, max_pages + 1, batch_size):
-                batch_end = min(batch_start + batch_size, max_pages + 1)
-                tasks = [fetch_page(p) for p in range(batch_start, batch_end)]
-                completed = await asyncio.gather(*tasks)
-                
-                for _, courses in completed:
-                    all_courses.extend(courses)
-            
-            # 最终过滤并返回所有匹配结果
-            results = []
-            for course in all_courses:
-                course_name = course.get("name", "").lower()
-                course_code = course.get("code", "").lower()
-                teacher = course.get("teacher", "").lower()
-                
-                if (query_lower in course_name or 
-                    query_lower in course_code or 
-                    query_lower in teacher):
-                    results.append(course)
-            
-            return results
-    
+                return []
+
+            first = await _fetch_mirror(1)
+            # get total
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                r0 = await c.get(f"{base_url}/api/course/", params={"page": 1, "page_size": 20})
+            total = r0.json().get("count", 0) if r0.status_code == 200 else 0
+            total_pages = min(max_pages, (total + 19) // 20)
+
+            all_courses.extend(first)
+            tasks = [_fetch_mirror(p) for p in range(2, total_pages + 1)]
+            for batch in [tasks[i:i+50] for i in range(0, len(tasks), 50)]:
+                for results in await asyncio.gather(*batch):
+                    all_courses.extend(results)
+
+            return [
+                c for c in all_courses
+                if query_lower in c.get("name", "").lower()
+                or query_lower in c.get("code", "").lower()
+                or query_lower in c.get("teacher", "").lower()
+            ]
+        finally:
+            if session:
+                await session.__aexit__(None, None, None)
+
     async def _get_course_reviews(self, course: dict) -> dict:
-        """Get reviews for a specific course"""
-        base_url = "http://nas.oct0pus.top:41735"
+        """Get reviews for a specific course."""
+        session, base_url = await self._make_course_session()
         course_id = course["id"]
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # 获取课程评价
-            response = await client.get(
-                f"{base_url}/api/course/{course_id}/review/",
-                params={"page_size": 10}
-            )
-            
-            reviews = []
-            if response.status_code == 200:
-                data = response.json()
-                reviews = data.get("results", [])
-            
-            return {
-                "course": course,
-                "reviews": reviews,
-            }
+        reviews: list[dict] = []
+
+        try:
+            params: dict = {"size": 10} if base_url.startswith("https://course.sjtu.plus") else {"page_size": 10}
+            if session:
+                async with session:
+                    resp = await session.get(f"{base_url}/api/course/{course_id}/review/", params=params)
+            else:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(f"{base_url}/api/course/{course_id}/review/", params=params)
+
+            if resp.status_code == 200:
+                reviews = resp.json().get("results", [])
+        except Exception as exc:
+            logger.warning("Failed to fetch reviews for course {}: {}", course_id, exc)
+
+        return {"course": course, "reviews": reviews}
     
     async def _summarize_courses(self, query: str, results: list[dict], total_found: int = 0) -> str:
         """Use LLM to summarize course information and reviews"""

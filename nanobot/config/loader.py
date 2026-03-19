@@ -23,6 +23,24 @@ def get_config_path() -> Path:
     return Path.home() / ".nanobot" / "config.json"
 
 
+_DEFAULT_CONFIG: dict = {
+    "sjtu": {
+        "jaccountUsername": "",
+        "jaccountPassword": "",
+    }
+}
+
+
+def _init_config_dir(path: Path) -> None:
+    """Create ~/.nanobot/ and a default config.json on first run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
+    path.chmod(0o600)
+    print(f"Initialized config at {path}")
+    print("Run /jaccount to set your JAccount credentials.")
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.
@@ -34,6 +52,9 @@ def load_config(config_path: Path | None = None) -> Config:
         Loaded configuration object.
     """
     path = config_path or get_config_path()
+
+    if not path.exists() and config_path is None:
+        _init_config_dir(path)
 
     if path.exists():
         try:

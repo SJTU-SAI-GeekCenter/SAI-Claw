@@ -150,6 +150,13 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class SJTUConfig(Base):
+    """SJTU JAccount credentials for accessing SJTU services."""
+
+    jaccount_username: str = ""
+    jaccount_password: str = ""
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -158,6 +165,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    sjtu: SJTUConfig = Field(default_factory=SJTUConfig)
 
     @property
     def workspace_path(self) -> Path:
