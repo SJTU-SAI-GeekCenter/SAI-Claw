@@ -155,6 +155,7 @@ class SJTUConfig(Base):
 
     jaccount_username: str = ""
     jaccount_password: str = ""
+    canvas_session: str = ""  # Canvas session cookie after OAuth2 login
 
 
 class Config(BaseSettings):

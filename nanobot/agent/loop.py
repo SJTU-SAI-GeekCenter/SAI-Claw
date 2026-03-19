@@ -427,7 +427,9 @@ class AgentLoop:
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
                 "/config /xuanke — 设置选课社区账号（邮箱+密码）",
+                "/config /canvas — 通过 JAccount OAuth2 登录 Canvas",
                 "/xuanke <课程名/课号/教师> — 查询 SJTU 选课社区评价",
+                "/canvas <问题> — 查询 Canvas 课程、作业、文件等（需先 /config /canvas）",
                 "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
                 "/help — Show available commands",
             ]
@@ -439,9 +441,16 @@ class AgentLoop:
         if cmd == "/config /xuanke":
             return await self._handle_config_xuanke_start(msg, session)
 
+        if cmd == "/config /canvas":
+            return await self._handle_config_canvas_start(msg, session)
+
         # /xuanke command - SJTU 选课社区查询
         if cmd.startswith("/xuanke"):
             return await self._handle_xuanke_command(msg)
+
+        # /canvas command - Canvas LMS
+        if cmd.startswith("/canvas"):
+            return await self._handle_canvas_command(msg, session)
 
         # /summaryfile command - 期末考试复习助手
         if cmd.startswith("/summaryfile"):
@@ -663,6 +672,178 @@ class AgentLoop:
                 content=f"❌ 生成复习材料失败: {e}",
             )
     
+    async def _handle_canvas_command(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Handle /canvas <query> — run LLM with Canvas API tool."""
+        from nanobot.agent.tools.canvas_api import CanvasAPITool
+
+        parts = msg.content.strip().split(maxsplit=1)
+        query = parts[1].strip() if len(parts) > 1 else ""
+
+        if not query:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=(
+                    "📚 /canvas — 查询 Canvas (oc.sjtu.edu.cn)\n\n"
+                    "用法：/canvas <你的问题>\n\n"
+                    "示例：\n"
+                    "  /canvas 我有哪些课程\n"
+                    "  /canvas 大学物理有哪些作业\n"
+                    "  /canvas 列出 CS2305 的所有文件"
+                ),
+            )
+
+        cookie = self._sjtu_config.canvas_session if self._sjtu_config else ""
+        if not cookie:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="❌ 尚未登录 Canvas，请先运行 /config /canvas。",
+            )
+
+        canvas_tool = CanvasAPITool(cookie)
+        # Temporarily register the tool
+        self.tools.register(canvas_tool)
+        try:
+            history = session.get_history(max_messages=0)
+            canvas_context = (
+                "[Canvas 模式] 你可以使用 canvas_api 工具访问 SJTU Canvas LMS (oc.sjtu.edu.cn/api/v1/)。"
+                "根据用户问题调用合适的 Canvas API 获取数据，再用中文给出清晰回答。\n\n"
+                f"用户问题：{query}"
+            )
+            initial_messages = self.context.build_messages(
+                history=history,
+                current_message=canvas_context,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
+
+            async def _progress(content: str, *, tool_hint: bool = False) -> None:
+                meta = dict(msg.metadata or {})
+                meta["_progress"] = True
+                meta["_tool_hint"] = tool_hint
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+                ))
+
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages, on_progress=_progress,
+            )
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self.sessions.save(session)
+        finally:
+            self.tools.unregister("canvas_api")
+
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=final_content or "❌ 未能获取 Canvas 数据，请重试。",
+        )
+
+    async def _handle_config_canvas_start(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Step 1: Generate JAccount authorize URL and ask user to paste callback."""
+        from nanobot.agent.canvas import get_authorize_url
+        try:
+            url = await get_authorize_url()
+        except Exception as exc:
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"❌ 获取授权链接失败：{exc}",
+            )
+        session.metadata["_config_step"] = "canvas_callback"
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                "🎓 Canvas (oc.sjtu.edu.cn) JAccount 登录\n\n"
+                "**第一步**：在浏览器打开以下链接，用 JAccount 完成登录：\n\n"
+                f"`{url}`\n\n"
+                "**第二步**：登录成功后，浏览器跳转到 Canvas 主页。"
+                "打开浏览器开发者工具（F12）→ Application → Cookies → `https://oc.sjtu.edu.cn`，"
+                "找到名为 `_normandy_session` 的 cookie，复制其 Value 粘贴回来。"
+            ),
+        )
+
+    async def _handle_config_step(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Handle subsequent messages in any /config flow."""
+        from nanobot.config.loader import get_config_path, load_config, save_config
+
+        step = session.metadata.get("_config_step")
+        text = msg.content.strip()
+
+        # --- canvas session cookie ---
+        if step == "canvas_callback":
+            session.metadata.pop("_config_step", None)
+            self.sessions.save(session)
+
+            cookie = text.strip()
+            if not cookie:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="❌ Cookie 为空，请重试 /config /canvas。",
+                )
+            try:
+                config = load_config(get_config_path())
+                config.sjtu.canvas_session = cookie
+                save_config(config, get_config_path())
+                if self._sjtu_config is not None:
+                    self._sjtu_config.canvas_session = cookie
+            except Exception as exc:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ 保存失败：{exc}",
+                )
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="✅ Canvas session 已保存，可以使用 Canvas 功能了。",
+            )
+
+        # --- xuanke username/password ---
+        if step == "xuanke_username":
+            session.metadata["_config_step"] = "xuanke_password"
+            session.metadata["_config_pending_username"] = text
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="请输入你的 course.sjtu.plus 密码：",
+            )
+
+        if step == "xuanke_password":
+            username = session.metadata.pop("_config_pending_username", "")
+            session.metadata.pop("_config_step", None)
+            try:
+                config = load_config(get_config_path())
+                config.sjtu.jaccount_username = username
+                config.sjtu.jaccount_password = text
+                save_config(config, get_config_path())
+                if self._sjtu_config is not None:
+                    self._sjtu_config.jaccount_username = username
+                    self._sjtu_config.jaccount_password = text
+            except Exception as exc:
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ 保存失败：{exc}",
+                )
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"✅ 选课社区账号已保存（用户名：{username}）\n\n现在可以使用 /xuanke 查询课程评价了。",
+            )
+
+        # Unknown step — clear state
+        session.metadata.pop("_config_step", None)
+        session.metadata.pop("_config_pending_username", None)
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="❌ 设置流程出错，已重置。",
+        )
+
     async def _handle_config_xuanke_start(
         self, msg: InboundMessage, session: Session
     ) -> OutboundMessage:
@@ -673,63 +854,6 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             content="🔐 选课社区账号设置\n\n请输入你的 course.sjtu.plus 邮箱：",
-        )
-
-    async def _handle_config_step(
-        self, msg: InboundMessage, session: Session
-    ) -> OutboundMessage:
-        """Handle subsequent messages in the /config flow."""
-        from nanobot.config.loader import get_config_path, load_config, save_config
-
-        step = session.metadata.get("_config_step")
-        text = msg.content.strip()
-
-        if step == "xuanke_username":
-            session.metadata["_config_step"] = "xuanke_password"
-            session.metadata["_config_pending_username"] = text
-            self.sessions.save(session)
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content="请输入你的 course.sjtu.plus 密码：",
-            )
-
-        if step == "xuanke_password":
-            username = session.metadata.pop("_config_pending_username", "")
-            session.metadata.pop("_config_step", None)
-
-            try:
-                config = load_config(get_config_path())
-                config.sjtu.jaccount_username = username
-                config.sjtu.jaccount_password = text
-                save_config(config, get_config_path())
-                if self._sjtu_config is not None:
-                    self._sjtu_config.jaccount_username = username
-                    self._sjtu_config.jaccount_password = text
-            except Exception as exc:
-                logger.error("Failed to save xuanke credentials: {}", exc)
-                self.sessions.save(session)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=f"❌ 保存失败：{exc}",
-                )
-
-            self.sessions.save(session)
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=f"✅ 选课社区账号已保存（用户名：{username}）\n\n现在可以使用 /xuanke 查询课程评价了。",
-            )
-
-        # Unknown step — clear state
-        session.metadata.pop("_config_step", None)
-        session.metadata.pop("_config_pending_username", None)
-        self.sessions.save(session)
-        return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content="❌ 设置流程出错，已重置。请重新发送 /config /xuanke。",
         )
 
     async def _handle_xuanke_command(
