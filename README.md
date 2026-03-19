@@ -19,4 +19,10 @@ uv tool install nanobot-ai
 `/summaryfile /path/to/file.pdf /summaryfile ~/Downloads/lecture.pdf --exam-date 2024-01-20 /summaryfile ./notes.pdf --focus '第三章积分’`                                                                                                        
 
 ### /xuanke 选课社区
+
 首先 `/config /xuanke`来输入邮箱前缀（不包含@sjtu.edu.cn）和选课社区密码。然后使用 `/xuanke 老师名`,`/xuanke 课程名` 来搜索。
+
+### /canvas Canvas 功能
+
+首先 `/config /canvas`，然后按照教程打开已经登陆的 canvas，拿到 `_normandy_session` 码复制给 bot，然后使用 `/canvas 你的需求` 即可使用！
+例如：`/canvas 查看我一共有哪些课程`，`/canvas 帮我下载大学物理三的最新一次 ppt`
