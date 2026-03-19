@@ -11,6 +11,8 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+import httpx
+
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
@@ -417,12 +419,17 @@ class AgentLoop:
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/xuanke <课程名/课号/教师> — 查询 SJTU 选课社区评价",
                 "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
+        
+        # /xuanke command - SJTU 选课社区查询
+        if cmd.startswith("/xuanke"):
+            return await self._handle_xuanke_command(msg)
         
         # /summaryfile command - 期末考试复习助手
         if cmd.startswith("/summaryfile"):
@@ -644,6 +651,287 @@ class AgentLoop:
                 content=f"❌ 生成复习材料失败: {e}",
             )
     
+    async def _handle_xuanke_command(
+        self, msg: InboundMessage
+    ) -> OutboundMessage:
+        """Handle /xuanke command - SJTU 选课社区查询"""
+        content = msg.content.strip()
+        parts = content.split(maxsplit=1)
+        
+        if len(parts) < 2:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "❌ 用法错误\n\n"
+                    "📚 /xuanke - 查询 SJTU 选课社区评价\n"
+                    "查询上海交通大学课程评价和老师评分\n\n"
+                    "用法：\n"
+                    "  /xuanke <课程名>     - 按课程名称搜索\n"
+                    "  /xuanke <课号>       - 按课程代码搜索\n"
+                    "  /xuanke <教师名>     - 按教师姓名搜索\n\n"
+                    "示例：\n"
+                    "  /xuanke 机器学习\n"
+                    "  /xuanke AI3604\n"
+                    "  /xuanke 李旭东"
+                ),
+            )
+        
+        query = parts[1].strip()
+        
+        # 发送处理中消息
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"🔍 正在查询「{query}」的课程评价...",
+            )
+        )
+        
+        try:
+            # 第一阶段：快速搜索前100页
+            courses_first = await self._search_courses_batch(query, max_pages=100)
+            
+            if not courses_first:
+                # 第一阶段没找到，继续搜索全部
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"🔍 正在深入搜索「{query}」...",
+                    )
+                )
+                courses_all = await self._search_courses_batch(query, max_pages=668)
+                courses_first = courses_all
+            
+            if not courses_first:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"❌ 未找到与「{query}」相关的课程",
+                )
+            
+            # 取前5个获取评价
+            top_courses = courses_first[:5]
+            results = []
+            for course in top_courses:
+                course_info = await self._get_course_reviews(course)
+                results.append(course_info)
+            
+            # 生成总结
+            summary = await self._summarize_courses(query, results, total_found=len(courses_first))
+            
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=summary,
+            )
+            
+        except Exception as e:
+            logger.error("Xuanke command failed: {}", e)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"❌ 查询失败: {e}",
+            )
+    
+    async def _search_courses_batch(self, query: str, max_pages: int = 100) -> list[dict]:
+        """Search courses from SJTU course mirror API with specified page limit"""
+        base_url = "http://nas.oct0pus.top:41735"
+        query_lower = query.lower()
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 先获取第1页
+            response = await client.get(
+                f"{base_url}/api/course/",
+                params={"page": 1, "page_size": 20}
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            all_courses = data.get("results", [])
+            total_count = data.get("count", 0)
+            total_pages = (total_count + 19) // 20
+            
+            # 限制搜索页数
+            max_pages = min(max_pages, total_pages)
+            
+            # 并发获取多页
+            async def fetch_page(page: int) -> tuple[int, list[dict]]:
+                try:
+                    resp = await client.get(
+                        f"{base_url}/api/course/",
+                        params={"page": page, "page_size": 20},
+                        timeout=15.0
+                    )
+                    if resp.status_code == 200:
+                        return page, resp.json().get("results", [])
+                except Exception:
+                    pass
+                return page, []
+            
+            # 分批并发获取，每批50个请求
+            batch_size = 50
+            for batch_start in range(2, max_pages + 1, batch_size):
+                batch_end = min(batch_start + batch_size, max_pages + 1)
+                tasks = [fetch_page(p) for p in range(batch_start, batch_end)]
+                completed = await asyncio.gather(*tasks)
+                
+                for _, courses in completed:
+                    all_courses.extend(courses)
+            
+            # 最终过滤并返回所有匹配结果
+            results = []
+            for course in all_courses:
+                course_name = course.get("name", "").lower()
+                course_code = course.get("code", "").lower()
+                teacher = course.get("teacher", "").lower()
+                
+                if (query_lower in course_name or 
+                    query_lower in course_code or 
+                    query_lower in teacher):
+                    results.append(course)
+            
+            return results
+    
+    async def _get_course_reviews(self, course: dict) -> dict:
+        """Get reviews for a specific course"""
+        base_url = "http://nas.oct0pus.top:41735"
+        course_id = course["id"]
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 获取课程评价
+            response = await client.get(
+                f"{base_url}/api/course/{course_id}/review/",
+                params={"page_size": 10}
+            )
+            
+            reviews = []
+            if response.status_code == 200:
+                data = response.json()
+                reviews = data.get("results", [])
+            
+            return {
+                "course": course,
+                "reviews": reviews,
+            }
+    
+    async def _summarize_courses(self, query: str, results: list[dict], total_found: int = 0) -> str:
+        """Use LLM to summarize course information and reviews"""
+        if not results:
+            return f"未找到与「{query}」相关的课程评价"
+        
+        # 使用 total_found 如果提供，否则使用 results 长度
+        display_total = total_found if total_found > len(results) else len(results)
+        
+        # 构建提示
+        prompt = f"""请根据以下 SJTU 选课社区的查询结果，为用户生成一份详细的课程评价总结。
+
+## 用户查询
+「{query}」
+
+## 查询结果
+共找到 {display_total} 门相关课程，以下是前 {len(results)} 门的详细信息：
+"""
+        
+        for idx, result in enumerate(results, 1):
+            course = result["course"]
+            reviews = result["reviews"]
+            
+            rating = course.get("rating") or {}
+            avg_rating = rating.get("avg") or 0
+            review_count = rating.get("count") or 0
+            
+            prompt += f"\n### 课程 {idx}\n"
+            prompt += f"- 课程名称：{course.get('name', 'N/A')}\n"
+            prompt += f"- 课程代码：{course.get('code', 'N/A')}\n"
+            prompt += f"- 授课教师：{course.get('teacher', 'N/A')}\n"
+            prompt += f"- 开课院系：{course.get('department', 'N/A')}\n"
+            prompt += f"- 学分：{course.get('credit', 'N/A')}\n"
+            prompt += f"- 综合评分：{avg_rating:.1f}/5.0（基于 {review_count} 条评价）\n"
+            
+            if reviews:
+                prompt += f"\n#### 学生评价（{len(reviews)} 条）：\n"
+                for i, review in enumerate(reviews[:5], 1):
+                    semester = review.get('semester', '未知学期')
+                    rating_val = review.get('rating', 0)
+                    comment = review.get('comment', '无内容')
+                    score = review.get('score', None)
+                    
+                    prompt += f"\n**评价 {i}** ({semester}, 评分: {rating_val}/5"
+                    if score:
+                        prompt += f", 成绩: {score}"
+                    prompt += f")\n{comment}\n"
+            else:
+                prompt += "\n暂无学生评价\n"
+        
+        prompt += f"""
+## 请生成以下格式的总结报告：
+
+1. **查询结果概览** - 说明共找到 {display_total} 门相关课程，显示前 {len(results)} 门
+2. **各课程详细分析** - 对每个课程：
+   - 基本信息（名称、代码、教师、院系）
+   - 综合评分和推荐指数
+   - 学生评价要点总结（优缺点、给分情况、课程难度、作业量等）
+3. **选课建议** - 根据不同需求（如：给分好、学到东西、轻松等）给出建议
+4. **更多课程提示** - 如果 {display_total} > {len(results)}，提示用户"还有 {display_total - len(results)} 门相关课程，可使用更精确的关键词（如教师名或课号）查看更多"
+5. **总体评价** - 一句话总结
+
+请使用 emoji、表格等格式增强可读性，用中文回答。
+"""
+        
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一位熟悉上海交通大学课程的选课助手，擅长分析课程评价并为同学提供选课建议。"
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+        
+        try:
+            summary = await self._run_agent_loop_simple(messages)
+            return summary or "生成总结时出错，请重试"
+        except Exception as e:
+            logger.error("Failed to summarize courses: {}", e)
+            # 如果 LLM 总结失败，返回原始数据
+            return self._format_simple_results(query, results)
+    
+    def _format_simple_results(self, query: str, results: list[dict]) -> str:
+        """Format results in simple text when LLM summarization fails"""
+        lines = [f"📚 「{query}」的查询结果：\n"]
+        
+        for idx, result in enumerate(results, 1):
+            course = result["course"]
+            reviews = result["reviews"]
+            
+            rating = course.get("rating") or {}
+            avg_rating = rating.get("avg") or 0
+            review_count = rating.get("count") or 0
+            
+            stars = "⭐" * int(round(avg_rating))
+            
+            lines.append(f"\n**{idx}. {course.get('name', 'N/A')}** ({course.get('code', 'N/A')})")
+            lines.append(f"👨‍🏫 教师：{course.get('teacher', 'N/A')}")
+            lines.append(f"🏫 院系：{course.get('department', 'N/A')}")
+            lines.append(f"⭐ 评分：{avg_rating:.1f}/5.0 {stars} ({review_count} 条评价)")
+            lines.append(f"📖 学分：{course.get('credit', 'N/A')}")
+            
+            if reviews:
+                lines.append(f"\n📝 最新评价：")
+                for review in reviews[:3]:
+                    semester = review.get('semester', '未知学期')
+                    rating_val = review.get('rating', 0)
+                    comment = review.get('comment', '无内容')[:150]
+                    lines.append(f"  • [{semester}] {rating_val}⭐: {comment}...")
+            
+            lines.append("")
+        
+        lines.append("\n💡 使用 `/xuanke <课程名/课号/教师>` 查询更多课程")
+        return "\n".join(lines)
+
     async def _run_agent_loop_simple(self, messages: list[dict]) -> str:
         """Simplified agent loop for single-turn generation"""
         try:
