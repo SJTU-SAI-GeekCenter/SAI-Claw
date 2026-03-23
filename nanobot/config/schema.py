@@ -158,6 +158,13 @@ class SJTUConfig(Base):
     canvas_session: str = ""  # Canvas session cookie after OAuth2 login
 
 
+class VoiceConfig(Base):
+    """Edge-TTS voice output configuration."""
+
+    activate: bool = False
+    voice_name: str = "zh-CN-XiaoxiaoNeural"
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -167,6 +174,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     sjtu: SJTUConfig = Field(default_factory=SJTUConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
     @property
     def workspace_path(self) -> Path:

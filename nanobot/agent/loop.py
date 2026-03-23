@@ -35,7 +35,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, SJTUConfig, WebSearchConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, SJTUConfig, VoiceConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -70,6 +70,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         sjtu_config: SJTUConfig | None = None,
+        voice_config: VoiceConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -101,6 +102,7 @@ class AgentLoop:
         )
 
         self._sjtu_config = sjtu_config
+        self._voice_config = voice_config
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
@@ -402,10 +404,13 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
-        # /config multi-step state — intercept BEFORE slash-command check so
+        # /config and /voice multi-step state — intercept BEFORE slash-command check so
         # the password message never reaches the LLM or session history.
         if session.metadata.get("_config_step"):
             return await self._handle_config_step(msg, session)
+
+        if session.metadata.get("_voice_config_step"):
+            return await self._handle_voice_config_step(msg, session)
 
         # Slash commands
         cmd = msg.content.strip().lower()
@@ -431,11 +436,16 @@ class AgentLoop:
                 "/xuanke <课程名/课号/教师> — 查询 SJTU 选课社区评价",
                 "/canvas <问题> — 查询 Canvas 课程、作业、文件等（需先 /config /canvas）",
                 "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
+                "/voice — 语音播报设置（选择音色、开启/关闭）",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
             )
+
+        # /voice command
+        if cmd == "/voice":
+            return await self._handle_voice_config_start(msg, session)
 
         # /config subcommands
         if cmd == "/config /xuanke":
@@ -494,6 +504,10 @@ class AgentLoop:
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+        if self._voice_config and self._voice_config.activate:
+            self._schedule_background(self._speak(final_content))
+
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=msg.metadata or {},
@@ -843,6 +857,222 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
             content="❌ 设置流程出错，已重置。",
         )
+
+    # ── Voice config ──────────────────────────────────────────────────────────
+
+    _VOICE_OPTIONS: list[tuple[str, str]] = [
+        ("zh-CN-XiaoxiaoNeural", "晓晓（女，温柔）"),
+        ("zh-CN-XiaoyiNeural",   "晓伊（女，活泼）"),
+        ("zh-CN-YunxiNeural",    "云希（男，自然）"),
+        ("zh-CN-YunjianNeural",  "云健（男，沉稳）"),
+        ("zh-CN-YunyangNeural",  "云扬（男，新闻）"),
+        ("zh-CN-ManboNeural",    "曼波·小马（Manbo TTS）"),
+    ]
+
+    _MANBO_TTS_API = "https://api.h473fd122.nyat.app:41939/tts"
+    _MANBO_TTS_KEY = "dayun-web-test"
+
+    async def _handle_voice_config_start(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Step 1 of /voice: show available voices and ask user to pick."""
+        vc = self._voice_config
+        current_voice = vc.voice_name if vc else "zh-CN-XiaoxiaoNeural"
+        current_status = "开启 ✅" if (vc and vc.activate) else "关闭 ❌"
+
+        lines = ["🔊 语音播报设置", "", f"当前状态：{current_status}    当前音色：{current_voice}", ""]
+        lines.append("请选择音色（输入序号）：")
+        for i, (name, desc) in enumerate(self._VOICE_OPTIONS, 1):
+            marker = " ◀ 当前" if name == current_voice else ""
+            lines.append(f"  {i}. {desc}  ({name}){marker}")
+
+        session.metadata["_voice_config_step"] = "pick_voice"
+        self.sessions.save(session)
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
+
+    async def _handle_voice_config_step(
+        self, msg: InboundMessage, session: Session
+    ) -> OutboundMessage:
+        """Handle subsequent messages in the /voice config flow."""
+        from nanobot.config.loader import get_config_path, load_config, save_config
+
+        step = session.metadata.get("_voice_config_step")
+        text = msg.content.strip()
+
+        if step == "pick_voice":
+            try:
+                idx = int(text) - 1
+                if not (0 <= idx < len(self._VOICE_OPTIONS)):
+                    raise ValueError
+            except ValueError:
+                session.metadata.pop("_voice_config_step", None)
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="❌ 无效选项，已退出设置。请重新输入 /voice。",
+                )
+            chosen_name, chosen_desc = self._VOICE_OPTIONS[idx]
+            session.metadata["_voice_pending_name"] = chosen_name
+            session.metadata["_voice_config_step"] = "pick_activate"
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=(
+                    f"✅ 已选择音色：{chosen_desc}\n\n"
+                    "是否开启语音播报？\n"
+                    "  1. 开启\n"
+                    "  2. 关闭"
+                ),
+            )
+
+        if step == "pick_activate":
+            chosen_name = session.metadata.pop("_voice_pending_name", "zh-CN-XiaoxiaoNeural")
+            session.metadata.pop("_voice_config_step", None)
+
+            if text in ("1", "开启", "on", "true", "yes"):
+                activate = True
+            elif text in ("2", "关闭", "off", "false", "no"):
+                activate = False
+            else:
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="❌ 无效选项，已退出设置。请重新输入 /voice。",
+                )
+
+            try:
+                config = load_config(get_config_path())
+                config.voice.voice_name = chosen_name
+                config.voice.activate = activate
+                save_config(config, get_config_path())
+                if self._voice_config is not None:
+                    self._voice_config.voice_name = chosen_name
+                    self._voice_config.activate = activate
+            except Exception as exc:
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"❌ 保存失败：{exc}",
+                )
+
+            status_str = "开启 ✅" if activate else "关闭 ❌"
+            _, desc = next((v for v in self._VOICE_OPTIONS if v[0] == chosen_name), (chosen_name, chosen_name))
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"✅ 语音设置已保存\n\n音色：{desc}\n状态：{status_str}",
+            )
+
+        # Unknown step
+        session.metadata.pop("_voice_config_step", None)
+        session.metadata.pop("_voice_pending_name", None)
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="❌ 语音设置流程出错，已重置。",
+        )
+
+    async def _speak(self, text: str) -> None:
+        """Pipeline: LLM summarize → edge-tts → play mp3 (background, overwrites each time)."""
+        import sys
+
+        tts_path = Path.home() / ".nanobot" / "tts_output.mp3"
+        tts_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: LLM → 30-char brief
+        # Use a minimal, topic-neutral prompt so Claude doesn't editorialize
+        try:
+            resp = await self.provider.chat_with_retry(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "提取以下内容的核心信息，用不超过30个汉字输出一句话。"
+                            "只输出那句话本身，不要标点以外的任何前缀、后缀或解释。"
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                max_tokens=80,
+                temperature=0.1,
+            )
+            brief = (resp.content or "").strip()
+            # Clamp to 30 Chinese chars as hard limit
+            brief = brief[:30]
+        except Exception as exc:
+            logger.warning("TTS summarization failed: {}; falling back to truncation", exc)
+            brief = text[:30]
+
+        if not brief:
+            return
+
+        voice_name = self._voice_config.voice_name if self._voice_config else "zh-CN-XiaoxiaoNeural"
+        logger.info("TTS brief: {} | voice: {}", brief, voice_name)
+
+        # Step 2: generate mp3 — Manbo API or edge-tts
+        if voice_name == "zh-CN-ManboNeural":
+            tts_path = tts_path.with_suffix(".wav")
+
+            def _fetch_manbo(text: str, out_path: Path) -> str | None:
+                """POST text → receive WAV bytes directly. Runs in thread executor."""
+                import requests as _req
+                try:
+                    resp = _req.post(
+                        self._MANBO_TTS_API,
+                        headers={"Content-Type": "application/json", "X-API-Key": self._MANBO_TTS_KEY},
+                        json={"text": text},
+                        timeout=15,
+                    )
+                    if resp.status_code != 200:
+                        return f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    out_path.write_bytes(resp.content)
+                    return None
+                except Exception as exc:
+                    return str(exc)
+
+            loop = asyncio.get_event_loop()
+            err = await loop.run_in_executor(None, _fetch_manbo, brief, tts_path)
+            if err:
+                logger.warning("Manbo TTS failed: {}", err)
+                return
+        else:
+            # edge-tts
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "edge-tts",
+                    "--text", brief,
+                    "--voice", voice_name,
+                    "--write-media", str(tts_path),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr_data = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.warning("edge-tts error (code {}): {}", proc.returncode,
+                                   stderr_data.decode(errors="replace").strip())
+                    return
+            except FileNotFoundError:
+                logger.warning("edge-tts not found — run: pip install edge-tts")
+                return
+            except Exception as exc:
+                logger.warning("edge-tts failed: {}", exc)
+                return
+
+        # Step 3: play mp3
+        player_cmd = ["afplay", str(tts_path)] if sys.platform == "darwin" else ["mpg123", "-q", str(tts_path)]
+        try:
+            play_proc = await asyncio.create_subprocess_exec(
+                *player_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await play_proc.wait()
+        except FileNotFoundError:
+            logger.warning("Audio player not found: {}", player_cmd[0])
+        except Exception as exc:
+            logger.warning("TTS playback failed: {}", exc)
+
+    # ── /config /xuanke ───────────────────────────────────────────────────────
 
     async def _handle_config_xuanke_start(
         self, msg: InboundMessage, session: Session
