@@ -111,6 +111,15 @@ class SummaryPDFFileTool(Tool):
                 content_display = content[:50000] + "\n\n... (内容过长已截断，但总结会基于全部内容)"
 
             # 构建考试复习助手的系统提示
+            study_plan_section = ""
+            if exam_date:
+                study_plan_section = (
+                    "距离考试还有一段时间，建议按以下节奏复习：\n"
+                    "- 第1遍：通读 + 理解（建议时长）\n"
+                    "- 第2遍：重点记忆 + 做题（建议时长）\n"
+                    "- 第3遍：查漏补缺 + 模拟（建议时长）"
+                )
+
             exam_context = f"""
 📚 **文件信息**
 - 文件名：{fp.name}
@@ -182,7 +191,7 @@ class SummaryPDFFileTool(Tool):
 - 格式/单位易错点
 
 ## 9️⃣ 复习时间规划建议 (Study Plan)
-{'' if not exam_date else f'距离考试还有一段时间，建议按以下节奏复习：\n- 第1遍：通读 + 理解（建议时长）\n- 第2遍：重点记忆 + 做题（建议时长）\n- 第3遍：查漏补缺 + 模拟（建议时长）'}
+{study_plan_section}
 
 ## 🔟 延伸阅读与资源 (Extra Resources)
 - 如果还有不懂，应该去看哪本书/哪个视频？
