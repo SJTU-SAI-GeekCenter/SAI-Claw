@@ -21,8 +21,10 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.arxiv import ArxivGetTool, ArxivSearchTool
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+from nanobot.agent.tools.claude_tools import MultiEditFileTool, SearchFilesTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.pdf import PDFInfoTool, ReadPDFTool
+from nanobot.agent.tools.zotero_tools import ListZoteroCollectionsTool, SearchZoteroLibraryTool
 from nanobot.agent.tools.summarize_pdf import SummaryFileCommandTool, SummaryPDFFileTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -129,9 +131,13 @@ class AgentLoop:
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
         for cls in (WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(SearchFilesTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(MultiEditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ReadPDFTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(PDFInfoTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(SummaryPDFFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(SearchZoteroLibraryTool())
+        self.tools.register(ListZoteroCollectionsTool())
         self.tools.register(ExecTool(
             working_dir=str(self.workspace),
             timeout=self.exec_config.timeout,
@@ -406,10 +412,11 @@ class AgentLoop:
 
         # /config and /voice multi-step state — intercept BEFORE slash-command check so
         # the password message never reaches the LLM or session history.
-        if session.metadata.get("_config_step"):
+        metadata = session.metadata if isinstance(getattr(session, "metadata", None), dict) else {}
+        if metadata.get("_config_step"):
             return await self._handle_config_step(msg, session)
 
-        if session.metadata.get("_voice_config_step"):
+        if metadata.get("_voice_config_step"):
             return await self._handle_voice_config_step(msg, session)
 
         # Slash commands
