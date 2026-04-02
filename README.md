@@ -12,6 +12,18 @@ uv tool install nanobot-ai
 
 然后编辑 `~/.nanobot/config.json` 配置个性化信息。
 
+## 开发说明
+
+### 本地修改后重新安装
+
+`nanobot` 命令使用 uv 独立管理的 venv（`nanobot-ai`），**不会**自动读取本地源码改动。每次修改代码后需要重新安装才能生效：
+
+```bash
+uv tool install . --reinstall
+```
+
+> **原因**：`uv tool install nanobot-ai` 从 PyPI 安装的是发布版，与本地源码是两份独立的代码。直接用 `python` 运行时因为当前目录在 `sys.path` 里所以会读到本地版，但 `nanobot` 命令不会。重装后本地源码会替换 venv 里的包。
+
 ## feature
 
 ### /summaryfile - 期末考试复习助手 帮你快速总结PDF讲义，生成结构化复习材料                                                                

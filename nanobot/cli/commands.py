@@ -261,10 +261,196 @@ class _ThinkingSpinner:
                 self._spinner.start()
 
 
+class _CompanionPet:
+    """Small ghost companion that occasionally comments during the session."""
+
+    CHAR = "(o o)"
+    NAME = "Murmur"
+
+    _GREETINGS = [
+        "嗨～今天也要一起加油哦！",
+        "你好呀！我在这里陪着你～",
+        "又见面啦！今天有什么任务？",
+        "准备好了，随时出发！",
+        "来了来了～有我在不用怕！",
+    ]
+    _FAREWELLS = [
+        "再见！下次见～",
+        "辛苦了，好好休息哦！",
+        "拜拜！期待下次相遇～",
+        "明天见！",
+        "去休息吧，我也要充电了～",
+    ]
+    _TOOL_PHRASES: dict[str, list[str]] = {
+        "web_search":  ["去网上搜搜看～", "搜索引擎，启动！", "找找找～"],
+        "web_fetch":   ["去抓个页面～", "加载中..."],
+        "read_pdf":    ["翻开文件看看～", "好多字呢...", "认真阅读中～"],
+        "exec":        ["跑个代码试试～", "执行中，别眨眼！"],
+        "arxiv":       ["去找论文啦～", "学术气息扑面而来..."],
+        "read_file":   ["看看文件里写了什么～", "翻翻文件～"],
+        "write_file":  ["帮你写下来！"],
+        "list_dir":    ["翻翻目录看看～"],
+        "edit_file":   ["改一改～"],
+    }
+    _DEFAULT_PHRASES = ["在忙呢，稍等～", "马上好！", "处理中...", "努力干活中～"]
+
+    def __init__(self, speak_probability: float = 0.35):
+        self._p = speak_probability
+
+    def _roll(self) -> bool:
+        return random.random() < self._p
+
+    def greet(self) -> str:
+        return f"{self.CHAR} {self.NAME}: {random.choice(self._GREETINGS)}"
+
+    def farewell(self) -> str:
+        return f"{self.CHAR} {self.NAME}: {random.choice(self._FAREWELLS)}"
+
+    def _raw_comment(self, tool_hint: str) -> str | None:
+        """Return raw phrase text, or None (probability-based)."""
+        if not self._roll():
+            return None
+        for key, phrases in self._TOOL_PHRASES.items():
+            if key in tool_hint:
+                return random.choice(phrases)
+        return random.choice(self._DEFAULT_PHRASES)
+
+    def comment_on_tool(self, tool_hint: str) -> str | None:
+        """Return formatted comment with prefix, or None (probability-based)."""
+        text = self._raw_comment(tool_hint)
+        return f"{self.CHAR} {self.NAME}: {text}" if text else None
+
+
+_COMPANION = _CompanionPet()
+
+
+class _CompanionAnimator:
+    """Continuously animated companion rendered in the prompt_toolkit bottom toolbar.
+
+    The character is drawn entirely with ASCII/Unicode symbols — no emoji.
+
+    Idle:     (o o)·  Murmur     ← face + floating particle, occasional blink/smile
+    Thinking: (O_O)⠙  Murmur     ← wide eyes + braille spinner
+    Speaking: (^ ^)   Murmur: … ← happy face + speech text
+    """
+
+    # (face, right_particle) — face changes expression, particle gives the floating feel
+    _IDLE_FRAMES: list[tuple[str, str]] = [
+        ("(o o)", " "),
+        ("(o o)", "·"),
+        ("(o o)", " "),
+        ("(- -)", " "),   # blink
+        ("(o o)", " "),
+        ("(o o)", "·"),
+        ("(o o)", "✦"),
+        ("(^ ^)", " "),   # smile
+        ("(o o)", " "),
+        ("(o o)", "˙"),
+        ("(o o)", " "),
+        ("(- -)", " "),   # blink
+        ("(o o)", "·"),
+        ("(o o)", " "),
+    ]
+    _THINK_FACE = "(O_O)"
+    _SPEAK_FACE = "(^ ^)"
+    _THINK_SPINNERS = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+    _IDLE_THOUGHTS = [
+        "嗯嗯嗯～",
+        "今天有什么新任务？",
+        "在等你呢～",
+        "...",
+        "随时准备出发！",
+        "想喝奶茶...",
+        "等你呢～",
+        "发什么呆呢 (- -)",
+    ]
+
+    def __init__(self, name: str = "Murmur"):
+        self.name = name
+        self._idx = 0
+        self._speech: str = ""
+        self._speech_ticks = 0
+        self._idle_ticks = 0
+        self._next_thought = random.randint(20, 45)
+        self._thinking = False
+        self._task: asyncio.Task | None = None
+
+    def set_thinking(self, thinking: bool) -> None:
+        self._thinking = thinking
+
+    def speak(self, text: str, ticks: int = 10) -> None:
+        self._speech = text
+        self._speech_ticks = ticks
+
+    def get_toolbar(self):
+        from prompt_toolkit.formatted_text import HTML as _HTML
+        if self._speech:
+            return _HTML(
+                f'<style bg="ansiblack" fg="ansibrightmagenta">  {self._SPEAK_FACE} <b>{self.name}</b>: {self._speech}  </style>'
+            )
+        if self._thinking:
+            sp = self._THINK_SPINNERS[self._idx % len(self._THINK_SPINNERS)]
+            return _HTML(
+                f'<style bg="ansiblack" fg="ansimagenta">  {self._THINK_FACE} {sp} {self.name}  </style>'
+            )
+        face, particle = self._IDLE_FRAMES[self._idx % len(self._IDLE_FRAMES)]
+        return _HTML(
+            f'<style bg="ansiblack" fg="ansipurple">  {face}{particle} {self.name}  </style>'
+        )
+
+    async def _loop(self) -> None:
+        while True:
+            self._idx += 1
+            if self._speech_ticks > 0:
+                self._speech_ticks -= 1
+                if self._speech_ticks == 0:
+                    self._speech = ""
+            if not self._thinking and not self._speech:
+                self._idle_ticks += 1
+                if self._idle_ticks >= self._next_thought:
+                    self._idle_ticks = 0
+                    self._next_thought = random.randint(20, 45)
+                    if random.random() < 0.4:
+                        self.speak(random.choice(self._IDLE_THOUGHTS), ticks=8)
+            try:
+                from prompt_toolkit.application import get_app
+                get_app().invalidate()
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+    def start(self) -> asyncio.Task:
+        self._task = asyncio.create_task(self._loop())
+        return self._task
+
+    def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            self._task = None
+
+
 def _print_cli_progress_line(text: str, thinking: _ThinkingSpinner | None) -> None:
     """Print a CLI progress line, pausing the spinner if needed."""
     with thinking.pause() if thinking else nullcontext():
         console.print(f"  [dim]↳ {text}[/dim]")
+
+
+def _print_companion_line(text: str, thinking: _ThinkingSpinner | None) -> None:
+    """Print a companion speech line (no arrow prefix), pausing the spinner if needed."""
+    with thinking.pause() if thinking else nullcontext():
+        console.print(f"  [dim magenta]{text}[/dim magenta]")
+
+
+async def _print_interactive_companion_line(text: str, thinking: _ThinkingSpinner | None) -> None:
+    """Print an interactive companion line with prompt_toolkit-safe Rich styling."""
+    def _write() -> None:
+        ansi = _render_interactive_ansi(
+            lambda c: c.print(f"  [dim magenta]{text}[/dim magenta]")
+        )
+        print_formatted_text(ANSI(ansi), end="")
+
+    with thinking.pause() if thinking else nullcontext():
+        await run_in_terminal(_write)
 
 
 async def _print_interactive_progress_line(text: str, thinking: _ThinkingSpinner | None) -> None:
@@ -278,7 +464,7 @@ def _is_exit_command(command: str) -> bool:
     return command.lower() in EXIT_COMMANDS
 
 
-async def _read_interactive_input_async() -> str:
+async def _read_interactive_input_async(bottom_toolbar=None) -> str:
     """Read user input using prompt_toolkit (handles paste, history, display).
 
     prompt_toolkit natively handles:
@@ -290,8 +476,12 @@ async def _read_interactive_input_async() -> str:
         raise RuntimeError("Call _init_prompt_session() first")
     try:
         with patch_stdout():
+            kwargs: dict = {}
+            if bottom_toolbar is not None:
+                kwargs["bottom_toolbar"] = bottom_toolbar
             return await _PROMPT_SESSION.prompt_async(
                 HTML("<b fg='ansiblue'>You:</b> "),
+                **kwargs,
             )
     except EOFError as exc:
         raise KeyboardInterrupt from exc
@@ -769,6 +959,10 @@ def agent(
             return
         if ch and not tool_hint and not ch.send_progress:
             return
+        if tool_hint:
+            comment = _COMPANION.comment_on_tool(content)
+            if comment:
+                _print_companion_line(comment, _thinking)
         _print_cli_progress_line(content, _thinking)
 
     if message:
@@ -788,6 +982,7 @@ def agent(
         from nanobot.bus.events import InboundMessage
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        console.print(f"  [dim magenta]{_COMPANION.greet()}[/dim magenta]\n")
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
@@ -811,6 +1006,9 @@ def agent(
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            _animator = _CompanionAnimator()
+            anim_task = _animator.start()
+
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -828,6 +1026,13 @@ def agent(
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
+                                if is_tool_hint:
+                                    raw = _COMPANION._raw_comment(msg.content)
+                                    if raw:
+                                        _animator.speak(raw, ticks=10)
+                                        await _print_interactive_companion_line(
+                                            f"{_COMPANION.CHAR} {_COMPANION.NAME}: {raw}", _thinking
+                                        )
                                 await _print_interactive_progress_line(msg.content, _thinking)
 
                         elif not turn_done.is_set():
@@ -848,13 +1053,16 @@ def agent(
                 while True:
                     try:
                         _flush_pending_tty_input()
-                        user_input = await _read_interactive_input_async()
+                        user_input = await _read_interactive_input_async(
+                            bottom_toolbar=_animator.get_toolbar
+                        )
                         command = user_input.strip()
                         if not command:
                             continue
 
                         if _is_exit_command(command):
                             _restore_terminal()
+                            console.print(f"\n  [dim magenta]{_COMPANION.farewell()}[/dim magenta]")
                             console.print("\nGoodbye!")
                             break
 
@@ -869,25 +1077,31 @@ def agent(
                         ))
 
                         nonlocal _thinking
+                        _animator.set_thinking(True)
                         _thinking = _ThinkingSpinner(enabled=not logs)
                         with _thinking:
                             await turn_done.wait()
                         _thinking = None
+                        _animator.set_thinking(False)
 
                         if turn_response:
                             _print_agent_response(turn_response[0], render_markdown=markdown)
                     except KeyboardInterrupt:
                         _restore_terminal()
+                        console.print(f"\n  [dim magenta]{_COMPANION.farewell()}[/dim magenta]")
                         console.print("\nGoodbye!")
                         break
                     except EOFError:
                         _restore_terminal()
+                        console.print(f"\n  [dim magenta]{_COMPANION.farewell()}[/dim magenta]")
                         console.print("\nGoodbye!")
                         break
             finally:
+                _animator.stop()
+                anim_task.cancel()
                 agent_loop.stop()
                 outbound_task.cancel()
-                await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
+                await asyncio.gather(bus_task, outbound_task, anim_task, return_exceptions=True)
                 await agent_loop.close_mcp()
 
         asyncio.run(run_interactive())
