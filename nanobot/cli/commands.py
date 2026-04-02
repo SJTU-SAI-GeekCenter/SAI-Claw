@@ -2,6 +2,8 @@
 
 import asyncio
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, asdict
+import json
 import os
 import select
 import signal
@@ -29,6 +31,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.application import run_in_terminal
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -261,112 +264,218 @@ class _ThinkingSpinner:
                 self._spinner.start()
 
 
+# ─── Companion presets ──────────────────────────────────────────────────────
+
+_COMPANION_FACES: dict[str, dict] = {
+    "ghost": {
+        "idle": [
+            ("(o o)", " "), ("(o o)", "·"), ("(o o)", " "),
+            ("(- -)", " "),
+            ("(o o)", " "), ("(o o)", "·"), ("(o o)", "✦"),
+            ("(^ ^)", " "),
+            ("(o o)", " "), ("(o o)", "˙"), ("(o o)", " "),
+            ("(- -)", " "), ("(o o)", "·"), ("(o o)", " "),
+        ],
+        "think": "(O_O)", "speak": "(^ ^)", "char": "(o o)",
+    },
+    "cat": {
+        "idle": [
+            ("(=.=)", " "), ("(=.=)", "~"), ("(=.=)", " "),
+            ("(-,-)", " "),
+            ("(=.=)", " "), ("(=.=)", "~"), ("(=.=)", "✦"),
+            ("(^.^)", " "),
+            ("(=.=)", " "), ("(=.=)", "~"), ("(=.=)", " "),
+            ("(-,-)", " "), ("(=.=)", "~"), ("(=.=)", " "),
+        ],
+        "think": "(O.O)", "speak": "(^.^)", "char": "(=.=)",
+    },
+    "robot": {
+        "idle": [
+            ("[o_o]", " "), ("[o_o]", "·"), ("[o_o]", " "),
+            ("[-_-]", " "),
+            ("[o_o]", " "), ("[o_o]", "·"), ("[o_o]", "✦"),
+            ("[^_^]", " "),
+            ("[o_o]", " "), ("[o_o]", "˙"), ("[o_o]", " "),
+            ("[-_-]", " "), ("[o_o]", "·"), ("[o_o]", " "),
+        ],
+        "think": "[O_O]", "speak": "[^_^]", "char": "[o_o]",
+    },
+    "uwu": {
+        "idle": [
+            ("(owo)", " "), ("(owo)", "·"), ("(owo)", " "),
+            ("(-.-)","  "),
+            ("(owo)", " "), ("(owo)", "·"), ("(owo)", "✦"),
+            ("(^w^)", " "),
+            ("(owo)", " "), ("(owo)", "˙"), ("(owo)", " "),
+            ("(-.-)","  "), ("(owo)", "·"), ("(owo)", " "),
+        ],
+        "think": "(OwO)", "speak": "(^w^)", "char": "(owo)",
+    },
+}
+
+_COMPANION_MOODS: dict[str, dict] = {
+    "活泼": {
+        "speak_prob": 0.35,
+        "idle_thoughts": [
+            "嗯嗯嗯～", "今天有什么新任务？", "在等你呢～",
+            "...", "随时准备出发！", "想喝奶茶...", "发什么呆呢",
+        ],
+        "tool_phrases": {
+            "web_search": ["去网上搜搜看～", "搜索引擎，启动！", "找找找～"],
+            "web_fetch":  ["去抓个页面～", "加载中..."],
+            "read_pdf":   ["翻开文件看看～", "好多字呢...", "认真阅读中～"],
+            "exec":       ["跑个代码试试～", "执行中，别眨眼！"],
+            "arxiv":      ["去找论文啦～", "学术气息扑面而来..."],
+            "read_file":  ["看看文件里写了什么～", "翻翻文件～"],
+            "write_file": ["帮你写下来！"],
+            "list_dir":   ["翻翻目录看看～"],
+            "edit_file":  ["改一改～"],
+        },
+        "default_phrases": ["在忙呢，稍等～", "马上好！", "处理中...", "努力干活中～"],
+        "greetings": [
+            "嗨～今天也要一起加油哦！", "你好呀！我在这里陪着你～",
+            "又见面啦！今天有什么任务？", "准备好了，随时出发！",
+            "来了来了～有我在不用怕！",
+        ],
+        "farewells": [
+            "再见！下次见～", "辛苦了，好好休息哦！",
+            "拜拜！期待下次相遇～", "明天见！", "去休息吧，我也要充电了～",
+        ],
+    },
+    "安静": {
+        "speak_prob": 0.1,
+        "idle_thoughts": ["...", "嗯", "。"],
+        "tool_phrases": {},
+        "default_phrases": ["..."],
+        "greetings": ["嗯", "在"],
+        "farewells": ["。", "拜"],
+    },
+    "中二": {
+        "speak_prob": 0.4,
+        "idle_thoughts": [
+            "感受到了任务的波动...", "力量在汇聚...",
+            "命运之轮开始转动", "这份寂静...意味着什么", "我早已预见到这一刻",
+        ],
+        "tool_phrases": {
+            "web_search": ["情报搜集，启动！", "展开信息扫描..."],
+            "web_fetch":  ["与网络连接，接收数据流..."],
+            "read_pdf":   ["扫描文件，提取关键情报..."],
+            "exec":       ["系统指令执行中...感受到了力量！"],
+            "arxiv":      ["进入学术次元..."],
+        },
+        "default_phrases": ["力量正在凝聚...", "感受到了...", "这股气息..."],
+        "greetings": [
+            "你终于来了，我已等待许久...",
+            "命运将我们再次相聚...",
+            "我早已预见到你的到来",
+        ],
+        "farewells": [
+            "再会，旅人...", "命运的齿轮，暂时停止...", "直到下次命运相遇之时...",
+        ],
+    },
+    "毒舌": {
+        "speak_prob": 0.3,
+        "idle_thoughts": ["还不来", "发什么呆", "...", "行吧你忙", "慢慢来不急"],
+        "tool_phrases": {
+            "web_search": ["行吧我去搜", "又不会自己查"],
+            "read_pdf":   ["这么多字", "好长...算了我看"],
+            "exec":       ["代码跑跑看咯", "别崩就行"],
+            "arxiv":      ["论文啊...好吧"],
+        },
+        "default_phrases": ["行", "好吧", "搞定了", "就这？"],
+        "greetings": ["又来了", "哦来了", "嗯来了"],
+        "farewells": ["走了啊", "行拜", "终于走了（开玩笑）"],
+    },
+}
+
+_COMPANION_SETTINGS_PATH = Path.home() / ".nanobot" / "companion.json"
+
+
+@dataclass
+class CompanionSettings:
+    name: str = "Murmur"
+    mood: str = "活泼"
+    face: str = "ghost"
+
+    def save(self) -> None:
+        _COMPANION_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_COMPANION_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(asdict(self), f, ensure_ascii=False)
+
+    def face_char(self) -> str:
+        return _COMPANION_FACES.get(self.face, _COMPANION_FACES["ghost"])["char"]
+
+    @classmethod
+    def load(cls) -> "CompanionSettings":
+        try:
+            with open(_COMPANION_SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            valid = {k: v for k, v in data.items() if k in ("name", "mood", "face")}
+            return cls(**valid)
+        except Exception:
+            return cls()
+
+
+# ─── Companion classes ───────────────────────────────────────────────────────
+
 class _CompanionPet:
     """Small ghost companion that occasionally comments during the session."""
 
-    CHAR = "(o o)"
-    NAME = "Murmur"
+    def __init__(self) -> None:
+        self._char = "(o o)"
+        self._name = "Murmur"
+        self._speak_prob = 0.35
+        self._greetings: list[str] = _COMPANION_MOODS["活泼"]["greetings"]
+        self._farewells: list[str] = _COMPANION_MOODS["活泼"]["farewells"]
+        self._tool_phrases: dict[str, list[str]] = _COMPANION_MOODS["活泼"]["tool_phrases"]
+        self._default_phrases: list[str] = _COMPANION_MOODS["活泼"]["default_phrases"]
 
-    _GREETINGS = [
-        "嗨～今天也要一起加油哦！",
-        "你好呀！我在这里陪着你～",
-        "又见面啦！今天有什么任务？",
-        "准备好了，随时出发！",
-        "来了来了～有我在不用怕！",
-    ]
-    _FAREWELLS = [
-        "再见！下次见～",
-        "辛苦了，好好休息哦！",
-        "拜拜！期待下次相遇～",
-        "明天见！",
-        "去休息吧，我也要充电了～",
-    ]
-    _TOOL_PHRASES: dict[str, list[str]] = {
-        "web_search":  ["去网上搜搜看～", "搜索引擎，启动！", "找找找～"],
-        "web_fetch":   ["去抓个页面～", "加载中..."],
-        "read_pdf":    ["翻开文件看看～", "好多字呢...", "认真阅读中～"],
-        "exec":        ["跑个代码试试～", "执行中，别眨眼！"],
-        "arxiv":       ["去找论文啦～", "学术气息扑面而来..."],
-        "read_file":   ["看看文件里写了什么～", "翻翻文件～"],
-        "write_file":  ["帮你写下来！"],
-        "list_dir":    ["翻翻目录看看～"],
-        "edit_file":   ["改一改～"],
-    }
-    _DEFAULT_PHRASES = ["在忙呢，稍等～", "马上好！", "处理中...", "努力干活中～"]
-
-    def __init__(self, speak_probability: float = 0.35):
-        self._p = speak_probability
+    def reconfigure(self, settings: CompanionSettings) -> None:
+        self._name = settings.name
+        self._char = _COMPANION_FACES.get(settings.face, _COMPANION_FACES["ghost"])["char"]
+        m = _COMPANION_MOODS.get(settings.mood, _COMPANION_MOODS["活泼"])
+        self._speak_prob = m["speak_prob"]
+        self._greetings = m["greetings"]
+        self._farewells = m["farewells"]
+        self._tool_phrases = m["tool_phrases"]
+        self._default_phrases = m["default_phrases"]
 
     def _roll(self) -> bool:
-        return random.random() < self._p
+        return random.random() < self._speak_prob
 
     def greet(self) -> str:
-        return f"{self.CHAR} {self.NAME}: {random.choice(self._GREETINGS)}"
+        return f"{self._char} {self._name}: {random.choice(self._greetings)}"
 
     def farewell(self) -> str:
-        return f"{self.CHAR} {self.NAME}: {random.choice(self._FAREWELLS)}"
+        return f"{self._char} {self._name}: {random.choice(self._farewells)}"
 
     def _raw_comment(self, tool_hint: str) -> str | None:
-        """Return raw phrase text, or None (probability-based)."""
         if not self._roll():
             return None
-        for key, phrases in self._TOOL_PHRASES.items():
+        for key, phrases in self._tool_phrases.items():
             if key in tool_hint:
                 return random.choice(phrases)
-        return random.choice(self._DEFAULT_PHRASES)
+        return random.choice(self._default_phrases)
 
     def comment_on_tool(self, tool_hint: str) -> str | None:
-        """Return formatted comment with prefix, or None (probability-based)."""
         text = self._raw_comment(tool_hint)
-        return f"{self.CHAR} {self.NAME}: {text}" if text else None
+        return f"{self._char} {self._name}: {text}" if text else None
 
 
 _COMPANION = _CompanionPet()
 
 
 class _CompanionAnimator:
-    """Continuously animated companion rendered in the prompt_toolkit bottom toolbar.
+    """Continuously animated companion rendered in the prompt_toolkit bottom toolbar."""
 
-    The character is drawn entirely with ASCII/Unicode symbols — no emoji.
-
-    Idle:     (o o)·  Murmur     ← face + floating particle, occasional blink/smile
-    Thinking: (O_O)⠙  Murmur     ← wide eyes + braille spinner
-    Speaking: (^ ^)   Murmur: … ← happy face + speech text
-    """
-
-    # (face, right_particle) — face changes expression, particle gives the floating feel
-    _IDLE_FRAMES: list[tuple[str, str]] = [
-        ("(o o)", " "),
-        ("(o o)", "·"),
-        ("(o o)", " "),
-        ("(- -)", " "),   # blink
-        ("(o o)", " "),
-        ("(o o)", "·"),
-        ("(o o)", "✦"),
-        ("(^ ^)", " "),   # smile
-        ("(o o)", " "),
-        ("(o o)", "˙"),
-        ("(o o)", " "),
-        ("(- -)", " "),   # blink
-        ("(o o)", "·"),
-        ("(o o)", " "),
-    ]
-    _THINK_FACE = "(O_O)"
-    _SPEAK_FACE = "(^ ^)"
     _THINK_SPINNERS = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-    _IDLE_THOUGHTS = [
-        "嗯嗯嗯～",
-        "今天有什么新任务？",
-        "在等你呢～",
-        "...",
-        "随时准备出发！",
-        "想喝奶茶...",
-        "等你呢～",
-        "发什么呆呢 (- -)",
-    ]
 
-    def __init__(self, name: str = "Murmur"):
-        self.name = name
+    def __init__(self) -> None:
+        self.name = "Murmur"
+        self._idle_frames: list[tuple[str, str]] = _COMPANION_FACES["ghost"]["idle"]
+        self._think_face: str = _COMPANION_FACES["ghost"]["think"]
+        self._speak_face: str = _COMPANION_FACES["ghost"]["speak"]
+        self._idle_thoughts: list[str] = _COMPANION_MOODS["活泼"]["idle_thoughts"]
         self._idx = 0
         self._speech: str = ""
         self._speech_ticks = 0
@@ -374,6 +483,14 @@ class _CompanionAnimator:
         self._next_thought = random.randint(20, 45)
         self._thinking = False
         self._task: asyncio.Task | None = None
+
+    def reconfigure(self, settings: CompanionSettings) -> None:
+        self.name = settings.name
+        face = _COMPANION_FACES.get(settings.face, _COMPANION_FACES["ghost"])
+        self._idle_frames = face["idle"]
+        self._think_face = face["think"]
+        self._speak_face = face["speak"]
+        self._idle_thoughts = _COMPANION_MOODS.get(settings.mood, _COMPANION_MOODS["活泼"])["idle_thoughts"]
 
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = thinking
@@ -386,14 +503,14 @@ class _CompanionAnimator:
         from prompt_toolkit.formatted_text import HTML as _HTML
         if self._speech:
             return _HTML(
-                f'<style bg="ansiblack" fg="ansibrightmagenta">  {self._SPEAK_FACE} <b>{self.name}</b>: {self._speech}  </style>'
+                f'<style bg="ansiblack" fg="ansibrightmagenta">  {self._speak_face} <b>{self.name}</b>: {self._speech}  </style>'
             )
         if self._thinking:
             sp = self._THINK_SPINNERS[self._idx % len(self._THINK_SPINNERS)]
             return _HTML(
-                f'<style bg="ansiblack" fg="ansimagenta">  {self._THINK_FACE} {sp} {self.name}  </style>'
+                f'<style bg="ansiblack" fg="ansimagenta">  {self._think_face} {sp} {self.name}  </style>'
             )
-        face, particle = self._IDLE_FRAMES[self._idx % len(self._IDLE_FRAMES)]
+        face, particle = self._idle_frames[self._idx % len(self._idle_frames)]
         return _HTML(
             f'<style bg="ansiblack" fg="ansipurple">  {face}{particle} {self.name}  </style>'
         )
@@ -411,7 +528,7 @@ class _CompanionAnimator:
                     self._idle_ticks = 0
                     self._next_thought = random.randint(20, 45)
                     if random.random() < 0.4:
-                        self.speak(random.choice(self._IDLE_THOUGHTS), ticks=8)
+                        self.speak(random.choice(self._idle_thoughts), ticks=8)
             try:
                 from prompt_toolkit.application import get_app
                 get_app().invalidate()
@@ -457,6 +574,66 @@ async def _print_interactive_progress_line(text: str, thinking: _ThinkingSpinner
     """Print an interactive progress line, pausing the spinner if needed."""
     with thinking.pause() if thinking else nullcontext():
         await _print_interactive_line(text)
+
+
+def _handle_companion_command(
+    command: str,
+    settings: CompanionSettings,
+    animator: "_CompanionAnimator",
+) -> None:
+    """Handle /companion subcommands and update the companion live."""
+    parts = command.strip().split(None, 2)
+    subcmd = parts[1].lower() if len(parts) > 1 else ""
+    arg = parts[2].strip() if len(parts) > 2 else ""
+
+    face_names = " / ".join(_COMPANION_FACES)
+    mood_names = " / ".join(_COMPANION_MOODS)
+
+    if not subcmd or subcmd in ("help", "?"):
+        console.print(Panel(
+            f"[bold]当前设置[/bold]\n"
+            f"  名字  [magenta]{settings.name}[/magenta]\n"
+            f"  心情  [magenta]{settings.mood}[/magenta]\n"
+            f"  外形  [magenta]{settings.face}[/magenta]\n\n"
+            f"[bold]指令[/bold]\n"
+            f"  /companion name <名字>      改名字（任意文字）\n"
+            f"  /companion mood <心情>      改心情：[cyan]{mood_names}[/cyan]\n"
+            f"  /companion face <外形>      改外形：[cyan]{face_names}[/cyan]\n"
+            f"  /companion reset            恢复默认",
+            title=f"[magenta]{settings.face_char()} {settings.name}[/magenta]",
+            border_style="dim magenta",
+            expand=False,
+        ))
+        return
+
+    if subcmd == "name":
+        if not arg:
+            console.print("[red]用法: /companion name <名字>[/red]")
+            return
+        settings.name = arg
+    elif subcmd == "mood":
+        if arg not in _COMPANION_MOODS:
+            console.print(f"[red]可选心情: {mood_names}[/red]")
+            return
+        settings.mood = arg
+    elif subcmd == "face":
+        if arg not in _COMPANION_FACES:
+            console.print(f"[red]可选外形: {face_names}[/red]")
+            return
+        settings.face = arg
+    elif subcmd == "reset":
+        settings.name = "Murmur"
+        settings.mood = "活泼"
+        settings.face = "ghost"
+    else:
+        console.print(f"[red]未知指令 [{subcmd}]，输入 /companion 查看帮助[/red]")
+        return
+
+    _COMPANION.reconfigure(settings)
+    animator.reconfigure(settings)
+    settings.save()
+    char = settings.face_char()
+    console.print(f"  [magenta]{char} {settings.name}: 好的！[/magenta]")
 
 
 def _is_exit_command(command: str) -> bool:
@@ -1006,7 +1183,11 @@ def agent(
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            settings = CompanionSettings.load()
+            _COMPANION.reconfigure(settings)
+
             _animator = _CompanionAnimator()
+            _animator.reconfigure(settings)
             anim_task = _animator.start()
 
             bus_task = asyncio.create_task(agent_loop.run())
@@ -1058,6 +1239,10 @@ def agent(
                         )
                         command = user_input.strip()
                         if not command:
+                            continue
+
+                        if command.startswith("/companion"):
+                            _handle_companion_command(command, settings, _animator)
                             continue
 
                         if _is_exit_command(command):

@@ -24,6 +24,48 @@ uv tool install . --reinstall
 
 > **原因**：`uv tool install nanobot-ai` 从 PyPI 安装的是发布版，与本地源码是两份独立的代码。直接用 `python` 运行时因为当前目录在 `sys.path` 里所以会读到本地版，但 `nanobot` 命令不会。重装后本地源码会替换 venv 里的包。
 
+## Companion 宠物
+
+进入交互模式（`nanobot agent`，不加 `-m`）后，输入框正下方会出现一个持续动画的小伙伴 Murmur：
+
+```
+  (o o)· Murmur        ← 空闲，粒子浮动 + 偶尔眨眼/微笑
+  (O_O)⠙ Murmur        ← Agent 思考中，spinner 旋转
+  (^ ^)  Murmur: 搜索引擎，启动！   ← 工具调用时冒出气泡
+```
+
+**自动行为：** 启动打招呼、工具调用时随机评论（35% 概率）、长时间闲置自动说闲话、退出道别。
+
+### 自定义命令
+
+```bash
+/companion                  # 查看当前设置
+/companion name <名字>      # 改名，任意文字
+/companion mood <心情>      # 改心情
+/companion face <外形>      # 改外形
+/companion reset            # 恢复默认
+```
+
+**Moods:**
+
+| Mood | Style | Frequency |
+|------|-------|-----------|
+| 活泼 | Default, upbeat | 35% |
+| 安静 | Nearly silent, only「...」 | 10% |
+| 中二 | "The wheel of fate turns..." dramatic mode | 40% |
+| 毒舌 | Sarcastic — "fine, I'll look it up" | 30% |
+
+**Faces:**
+
+| Face | Idle | Thinking | Speaking |
+|------|------|----------|----------|
+| ghost | `(o o)` | `(O_O)` | `(^ ^)` |
+| cat | `(=.=)` | `(O.O)` | `(^.^)` |
+| robot | `[o_o]` | `[O_O]` | `[^_^]` |
+| uwu | `(owo)` | `(OwO)` | `(^w^)` |
+
+设置自动保存到 `~/.nanobot/companion.json`，下次启动自动恢复。
+
 ## feature
 
 ### /summaryfile - 期末考试复习助手 帮你快速总结PDF讲义，生成结构化复习材料                                                                
