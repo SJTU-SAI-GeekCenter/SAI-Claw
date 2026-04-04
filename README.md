@@ -80,3 +80,23 @@ uv tool install . --reinstall
 
 首先 `/config /canvas`，然后按照教程打开已经登陆的 canvas，拿到 `_normandy_session` 码复制给 bot，然后使用 `/canvas 你的需求` 即可使用！
 例如：`/canvas 查看我一共有哪些课程`，`/canvas 帮我下载大学物理三的最新一次 ppt`
+
+### /profile 个人画像
+
+输入 `/profile` 查看助手对你的长期记忆摘要——包括你的偏好、习惯、常用工具、历史话题等。
+
+画像由每次对话后的自动记忆整合构建，越聊越准。
+
+### 主动助手（Proactive Heartbeat）
+
+在工作区创建 `HEARTBEAT.md`，写入你希望助手定期自动执行的任务：
+
+```markdown
+- 检查今天的 Canvas 作业截止情况
+- 提醒我复习昨天学过的知识点
+- 如果工作区有新 PDF 就自动摘要
+```
+
+每隔约 30 分钟，助手会静默检查并执行这些任务，有结果时主动告诉你。
+
+输入 `/proactive` 查看当前任务列表。

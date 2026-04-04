@@ -932,6 +932,7 @@ def gateway(
         channels_config=config.channels,
         sjtu_config=config.sjtu,
         voice_config=config.voice,
+        embedding_model=config.agents.defaults.embedding_model,
     )
 
     # Set cron callback (needs agent)
@@ -1125,6 +1126,7 @@ def agent(
         channels_config=config.channels,
         sjtu_config=config.sjtu,
         voice_config=config.voice,
+        embedding_model=config.agents.defaults.embedding_model,
     )
 
     # Shared reference for progress callbacks
@@ -1183,12 +1185,39 @@ def agent(
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            from nanobot.heartbeat.service import HeartbeatService
+
             settings = CompanionSettings.load()
             _COMPANION.reconfigure(settings)
 
             _animator = _CompanionAnimator()
             _animator.reconfigure(settings)
             anim_task = _animator.start()
+
+            # Proactive heartbeat — fires tasks at idle intervals
+            async def on_heartbeat_execute(tasks: str) -> str:
+                return await agent_loop.process_direct(
+                    tasks,
+                    session_key="heartbeat",
+                    channel=cli_channel,
+                    chat_id=cli_chat_id,
+                )
+
+            async def on_heartbeat_notify(response: str) -> None:
+                notice = f"\n[主动助手] {response}"
+                await _print_interactive_response(notice, render_markdown=markdown)
+
+            hb_cfg = config.gateway.heartbeat
+            heartbeat = HeartbeatService(
+                workspace=config.workspace_path,
+                provider=provider,
+                model=config.agents.defaults.model,
+                on_execute=on_heartbeat_execute,
+                on_notify=on_heartbeat_notify,
+                interval_s=hb_cfg.interval_s,
+                enabled=hb_cfg.enabled,
+            )
+            await heartbeat.start()
 
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
@@ -1282,6 +1311,7 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                heartbeat.stop()
                 _animator.stop()
                 anim_task.cancel()
                 agent_loop.stop()

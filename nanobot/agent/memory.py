@@ -16,6 +16,7 @@ from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
+    from nanobot.agent.semantic_memory import SemanticMemoryStore
 
 
 _SAVE_MEMORY_TOOL = [
@@ -73,15 +74,27 @@ def _is_tool_choice_unsupported(content: str | None) -> bool:
 
 
 class MemoryStore:
-    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log)."""
+    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log).
+
+    Optionally enhanced with a third semantic layer: when *embedding_model* is
+    configured, every history entry is also embedded and stored in a numpy index
+    so that relevant past conversations can be retrieved by cosine similarity
+    rather than full-text grep.
+    """
 
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, embedding_model: str | None = None):
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
         self._consecutive_failures = 0
+
+        self.semantic: SemanticMemoryStore | None = None
+        if embedding_model:
+            from nanobot.agent.semantic_memory import SemanticMemoryStore
+            self.semantic = SemanticMemoryStore(self.memory_dir, embedding_model)
+            logger.debug("Semantic memory enabled with model: {}", embedding_model)
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -191,6 +204,10 @@ class MemoryStore:
             if update != current_memory:
                 self.write_long_term(update)
 
+            # Index the new entry for semantic retrieval (fire-and-forget).
+            if self.semantic is not None:
+                asyncio.create_task(self.semantic.add_entry(entry))
+
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
             return True
@@ -233,8 +250,9 @@ class MemoryConsolidator:
         context_window_tokens: int,
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        embedding_model: str | None = None,
     ):
-        self.store = MemoryStore(workspace)
+        self.store = MemoryStore(workspace, embedding_model=embedding_model)
         self.provider = provider
         self.model = model
         self.sessions = sessions

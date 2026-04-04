@@ -73,6 +73,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         sjtu_config: SJTUConfig | None = None,
         voice_config: VoiceConfig | None = None,
+        embedding_model: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -92,6 +93,15 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+
+        # Auto-derive embedding model from main model when not explicitly set.
+        if embedding_model is None:
+            from nanobot.agent.semantic_memory import resolve_embedding_model
+            embedding_model = resolve_embedding_model(self.model)
+            if embedding_model:
+                logger.info("Semantic memory: auto-selected embedding model {}", embedding_model)
+
+        self._embedding_model = embedding_model
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -121,6 +131,7 @@ class AgentLoop:
             context_window_tokens=context_window_tokens,
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
+            embedding_model=embedding_model,
         )
         self._register_default_tools()
 
@@ -181,6 +192,14 @@ class AgentLoop:
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+
+    async def _semantic_search(self, query: str) -> list[str] | None:
+        """Return semantically relevant history entries, or None if disabled."""
+        semantic = self.memory_consolidator.store.semantic
+        if semantic is None or not query.strip():
+            return None
+        results = await semantic.search(query, k=5)
+        return results if results else None
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -392,10 +411,12 @@ class AgentLoop:
             history = session.get_history(max_messages=0)
             # Subagent results should be assistant role, other system messages use user role
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
+            relevant_history = await self._semantic_search(msg.content)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 current_role=current_role,
+                relevant_history=relevant_history,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -444,6 +465,8 @@ class AgentLoop:
                 "/canvas <问题> — 查询 Canvas 课程、作业、文件等（需先 /config /canvas）",
                 "/summaryfile <pdf_path> [--exam-date YYYY-MM-DD] [--focus 'topic'] — 期末考试复习助手",
                 "/voice — 语音播报设置（选择音色、开启/关闭）",
+                "/profile — 查看你的个人画像（长期记忆摘要）",
+                "/proactive — 查看/触发主动助手任务（HEARTBEAT.md）",
                 "/help — Show available commands",
             ]
             return OutboundMessage(
@@ -472,6 +495,43 @@ class AgentLoop:
         # /summaryfile command - 期末考试复习助手
         if cmd.startswith("/summaryfile"):
             return await self._handle_summaryfile_command(msg)
+
+        # /profile command - 个人画像
+        if cmd == "/profile":
+            memory_content = self.memory_consolidator.store.read_long_term()
+            if not memory_content.strip():
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="还没有积累到足够的对话，画像暂时为空。多聊几次就会有了！",
+                )
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content=f"## 你的个人画像\n\n{memory_content}",
+            )
+
+        # /proactive command - 主动助手任务列表
+        if cmd == "/proactive":
+            heartbeat_file = self.workspace / "HEARTBEAT.md"
+            if heartbeat_file.exists():
+                content = heartbeat_file.read_text(encoding="utf-8")
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"## 主动助手任务 (HEARTBEAT.md)\n\n{content}\n\n> 每隔一段时间自动检查并执行上述任务。",
+                )
+            else:
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=(
+                        "HEARTBEAT.md 还不存在。\n\n"
+                        "在工作区创建 `HEARTBEAT.md`，写入你希望助手定期做的事，例如：\n\n"
+                        "```markdown\n"
+                        "- 检查今天的 Canvas 作业截止情况\n"
+                        "- 提醒我复习昨天学过的知识点\n"
+                        "- 如果工作区有新 PDF 就自动摘要\n"
+                        "```"
+                    ),
+                )
+
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
@@ -480,11 +540,13 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=0)
+        relevant_history = await self._semantic_search(msg.content)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            relevant_history=relevant_history,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
