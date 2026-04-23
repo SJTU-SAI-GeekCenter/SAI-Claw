@@ -459,6 +459,11 @@ class AgentLoop:
                 "/new — Start a new conversation",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
+                "/vocab <words> — Store vocabulary words",
+                "/word <word> — Query word details",
+                "/paragraph <words> — Generate contextual paragraph",
+                "/review — Review vocabulary",
+                "/stats — Show learning statistics",
                 "/config /xuanke — 设置选课社区账号（邮箱+密码）",
                 "/config /canvas — 通过 JAccount OAuth2 登录 Canvas",
                 "/xuanke <课程名/课号/教师> — 查询 SJTU 选课社区评价",
@@ -495,6 +500,11 @@ class AgentLoop:
         # /summaryfile command - 期末考试复习助手
         if cmd.startswith("/summaryfile"):
             return await self._handle_summaryfile_command(msg)
+
+        # /vocab commands - vocabulary learning (hard intercept for 0 latency)
+        vocab_commands = ("/vocab ", "/word ", "/paragraph", "/review", "/stats")
+        if cmd.startswith(vocab_commands):
+            return await self._handle_vocab_command(msg)
 
         # /profile command - 个人画像
         if cmd == "/profile":
@@ -754,7 +764,146 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=f"❌ 生成复习材料失败: {e}",
             )
-    
+
+    async def _handle_vocab_command(
+        self, msg: InboundMessage
+    ) -> OutboundMessage:
+        """Handle vocabulary learning commands with hard interception."""
+        from nanobot.skills.vocab import VocabHandler, VocabularyStore, VocabGenerator
+        from nanobot.skills.vocab.handler import (
+            format_word_result,
+            format_paragraph_result,
+            parse_command,
+        )
+
+        # Check if vocabulary feature is enabled
+        if not self.channels_config or not getattr(self.channels_config, "vocabulary", None):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="❌ 词汇学习功能未启用。请在配置中设置 channels.vocabulary.enabled = true",
+            )
+
+        vocab_config = self.channels_config.vocabulary
+        if not vocab_config.enabled:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="❌ 词汇学习功能未启用。请在配置中设置 channels.vocabulary.enabled = true",
+            )
+
+        # Initialize handler
+        store = VocabularyStore(db_path=vocab_config.db_path)
+        generator = VocabGenerator(provider=self.provider, model=self.model)
+        handler = VocabHandler(store=store, generator=generator)
+
+        command, args = parse_command(msg.content)
+
+        try:
+            if command == "/vocab":
+                if not args:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="❌ 请提供要存储的单词，例如：/vocab apple banana cherry",
+                    )
+
+                result = await handler.handle_vocab(args, user_id=msg.sender_id)
+                if result["success"]:
+                    text = f"✅ 已存储 {result['stored_count']} 个单词"
+                    if result["duplicate_count"] > 0:
+                        text += f"（跳过 {result['duplicate_count']} 个重复）"
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=text,
+                    )
+                else:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"❌ {result['error']}",
+                    )
+
+            elif command == "/word":
+                if not args:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="❌ 请提供要查询的单词，例如：/word resilience",
+                    )
+
+                word = args[0]
+                result = await handler.handle_word(word, user_id=msg.sender_id)
+
+                if result["success"]:
+                    content = format_word_result(result["word"])
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=content,
+                    )
+                else:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"❌ {result['error']}",
+                    )
+
+            elif command == "/paragraph":
+                result = await handler.handle_paragraph(words=args, level="intermediate")
+
+                if result["success"]:
+                    content = format_paragraph_result(result["content"])
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=content,
+                    )
+                else:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"❌ {result['error']}",
+                    )
+
+            elif command == "/review":
+                result = await handler.handle_review(user_id=msg.sender_id)
+
+                if result["success"]:
+                    lines = ["📝 **复习单词**\n"]
+                    for word_entry in result.get("review_words", []):
+                        lines.append(f"**{word_entry['word']}** - {word_entry.get('meaning', 'N/A')}")
+
+                    if result.get("message"):
+                        lines.append(f"\n💡 {result['message']}")
+
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="\n".join(lines),
+                    )
+
+            elif command == "/stats":
+                result = await handler.handle_stats(user_id=msg.sender_id)
+
+                if result["success"]:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"📊 **学习统计**\n\n总单词数：{result['total_words']}\n今日学习：{result['today_count']}",
+                    )
+
+        finally:
+            store.close()
+
+        # Fallback for unknown vocab commands
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="❌ 未知的词汇命令。支持的命令：/vocab, /word, /paragraph, /review, /stats",
+        )
+
     async def _handle_canvas_command(
         self, msg: InboundMessage, session: Session
     ) -> OutboundMessage:
