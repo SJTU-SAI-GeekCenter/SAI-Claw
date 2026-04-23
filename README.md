@@ -81,6 +81,35 @@ uv tool install . --reinstall
 首先 `/config /canvas`，然后按照教程打开已经登陆的 canvas，拿到 `_normandy_session` 码复制给 bot，然后使用 `/canvas 你的需求` 即可使用！
 例如：`/canvas 查看我一共有哪些课程`，`/canvas 帮我下载大学物理三的最新一次 ppt`
 
+### /vocab - 词汇学习
+
+智能英语词汇学习系统，支持单词存储、查询和语境生成。
+
+**命令：**
+- `/vocab <words>` - 存储单词到词库，例如：`/vocab apple resilience serendipity`
+- `/word <word>` - 查询单词详情（释义、音标、例句、词源、同反义词），例如：`/word resilience`
+- `/paragraph <words>` - 生成包含指定单词的语境短文（带中文翻译），例如：`/paragraph resilience community`
+- `/review` - 复习已学单词
+- `/stats` - 查看学习统计（总单词数、今日学习数）
+
+**特性：**
+- 硬拦截命令，0 延迟响应
+- SQLite 本地存储，用户隔离
+- LLM 生成例句、词源、语境短文
+- 支持自然语言查询（如"我昨天背了什么单词"）
+
+**配置：** 在 `~/.nanobot/config.json` 中启用：
+```json
+{
+  "channels": {
+    "vocabulary": {
+      "enabled": true,
+      "db_path": "~/.nanobot/data/vocabulary.db"
+    }
+  }
+}
+```
+
 ### /profile 个人画像
 
 输入 `/profile` 查看助手对你的长期记忆摘要——包括你的偏好、习惯、常用工具、历史话题等。
