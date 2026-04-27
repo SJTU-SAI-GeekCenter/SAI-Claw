@@ -1,5 +1,5 @@
 # SAI-Claw
-<img width="579.2" height="434.4" alt="image" src="https://github.com/user-attachments/assets/a785de9d-8803-4c28-bf94-362e939ca62f" />
+<img width="579.2" height="434.4" alt="9b88e66cc628856026a250320a425f78" src="https://github.com/user-attachments/assets/6b81e838-dd3b-452e-b511-d27a3c1d2215" />
 
 ## Introduction
 
