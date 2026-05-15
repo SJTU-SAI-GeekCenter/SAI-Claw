@@ -75,12 +75,9 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         sjtu_config: SJTUConfig | None = None,
         voice_config: VoiceConfig | None = None,
-<<<<<<< HEAD
         maintenance_model: str | None = None,
         review_interval_turns: int = 10,
-=======
         embedding_model: str | None = None,
->>>>>>> a0b3c64b788e43bae39986cb2446c4b0f6d999ad
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
