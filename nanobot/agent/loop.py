@@ -31,6 +31,8 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
+from nanobot.agent.tools.skill_manage import SkillManageTool
+from nanobot.agent.skill_usage import SkillUsageTracker
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
@@ -73,6 +75,8 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         sjtu_config: SJTUConfig | None = None,
         voice_config: VoiceConfig | None = None,
+        maintenance_model: str | None = None,
+        review_interval_turns: int = 10,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -91,6 +95,9 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self.maintenance_model = maintenance_model
+        self.review_interval_turns = review_interval_turns
+        self.skill_usage_tracker = SkillUsageTracker(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -101,6 +108,7 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            skill_usage_tracker=self.skill_usage_tracker,
         )
 
         self._sjtu_config = sjtu_config
@@ -152,6 +160,10 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        self.tools.register(SkillManageTool(
+            workspace=self.workspace,
+            usage_tracker=self.skill_usage_tracker,
+        ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -362,6 +374,44 @@ class AgentLoop:
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
 
+    async def _review_skills(self, session: Session) -> None:
+        """Fork a subagent to review the conversation for reusable procedural knowledge."""
+        recent = session.messages[-20:]
+        formatted = self.memory_consolidator.store._format_messages(recent)
+
+        task = f"""Review this recent conversation and identify reusable procedural knowledge
+that should be captured as a skill. Look for patterns like:
+- Multi-step workflows the user needed help with
+- Domain-specific knowledge that was discovered or used
+- Tool usage patterns that could be formalized
+- Tricky errors and their fixes
+
+## Priority (in order):
+1. If any skill was loaded or used in this conversation, patch it to fix errors or add missing information.
+2. If an existing skill covers a related topic, expand it with patch.
+3. ONLY create a new skill for class-level reusable patterns (not session-specific context).
+
+## What NOT to capture:
+- Session-specific context (e.g. a specific person's current project)
+- One-time commands or trivial tool calls
+- Information already well-documented in existing skills
+
+If nothing is worth capturing, respond "No changes needed."
+
+## Skills directory
+Workspace skills: {self.workspace}/skills/
+
+## Recent Conversation
+{formatted}"""
+
+        await self.subagents.spawn(
+            task=task,
+            label="Skills review",
+            origin_channel="system",
+            origin_chat_id="system:review",
+            session_key=session.key,
+        )
+
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
@@ -400,7 +450,10 @@ class AgentLoop:
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
+            session.turn_count += 1
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+            if session.turn_count % self.review_interval_turns == 0:
+                self._schedule_background(self._review_skills(session))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -504,7 +557,10 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+        session.turn_count += 1
         self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        if session.turn_count % self.review_interval_turns == 0:
+            self._schedule_background(self._review_skills(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

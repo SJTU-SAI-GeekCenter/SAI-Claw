@@ -565,6 +565,8 @@ def gateway(
         channels_config=config.channels,
         sjtu_config=config.sjtu,
         voice_config=config.voice,
+        maintenance_model=config.agents.defaults.maintenance_model,
+        review_interval_turns=config.agents.defaults.review_interval_turns,
     )
 
     # Set cron callback (needs agent)
@@ -758,6 +760,8 @@ def agent(
         channels_config=config.channels,
         sjtu_config=config.sjtu,
         voice_config=config.voice,
+        maintenance_model=config.agents.defaults.maintenance_model,
+        review_interval_turns=config.agents.defaults.review_interval_turns,
     )
 
     # Shared reference for progress callbacks

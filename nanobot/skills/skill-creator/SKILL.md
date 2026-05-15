@@ -21,6 +21,25 @@ equipped with procedural knowledge that no model can fully possess.
 3. Domain expertise - Company-specific knowledge, schemas, business logic
 4. Bundled resources - Scripts, references, and assets for complex and repetitive tasks
 
+### Managing Skills with skill_manage
+
+Use the `skill_manage` tool to manage workspace skills programmatically:
+
+- **skill_manage(action='create', skill_name='...', content='...')** — Create a new skill. Content must include YAML frontmatter with `name:` and `description:` fields. Skill names use lowercase with hyphens.
+- **skill_manage(action='patch', skill_name='...', content='...', patch_target='...')** — Replace a specific section of an existing skill. `patch_target` must be a unique substring in the current SKILL.md.
+- **skill_manage(action='delete', skill_name='...')** — Delete a workspace skill. Built-in skills cannot be deleted.
+
+The system also runs an automatic background review every ~10 conversation turns that forks a subagent to identify reusable patterns and create or patch skills. You do not need to manage this process — just be aware that new skills may appear after the user has long conversations.
+
+### When to Create a Skill
+
+Actively use `skill_manage(action='create')` when:
+- You completed a complex multi-step task (5+ tool calls) that would be useful to repeat
+- You fixed a tricky error with a non-obvious solution
+- You discovered a workflow or pattern that isn't well-documented elsewhere
+
+Prefer **class-level** skill names (e.g., `docker-deploy`, `pdf-editor`) over session-specific names (e.g., `johns-project-setup`).
+
 ## Core Principles
 
 ### Concise is Key
