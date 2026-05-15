@@ -13,6 +13,13 @@ class Base(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+class VocabularyConfig(Base):
+    """Configuration for vocabulary feature."""
+
+    enabled: bool = False
+    db_path: str = "~/.nanobot/data/vocabulary.db"
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels.
 
@@ -23,7 +30,8 @@ class ChannelsConfig(Base):
     model_config = ConfigDict(extra="allow")
 
     send_progress: bool = True  # stream agent's text progress to the channel
-    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
+    send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…))
+    vocabulary: VocabularyConfig = Field(default_factory=VocabularyConfig)
 
 
 class AgentDefaults(Base):
@@ -41,6 +49,7 @@ class AgentDefaults(Base):
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    embedding_model: str | None = None  # e.g. "text-embedding-3-small" — enables semantic memory
     review_interval_turns: int = 10  # trigger background skills review every N turns
     maintenance_model: str | None = None  # cheap model for background review tasks (None = use main model)
 
